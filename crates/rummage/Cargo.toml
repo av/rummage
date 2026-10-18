@@ -1,0 +1,42 @@
+[package]
+name = "rummage"
+description = "Local multimodal semantic search for your files"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[features]
+default = ["cpu"]
+cpu = ["rummage-embed/cpu"]
+vulkan = ["rummage-embed/vulkan"]
+rocm = ["rummage-embed/rocm"]
+cuda = ["rummage-embed/cuda"]
+
+[dependencies]
+rummage-core.workspace = true
+rummage-embed.workspace = true
+
+anyhow.workspace = true
+axum.workspace = true
+base64.workspace = true
+clap.workspace = true
+futures-util.workspace = true
+mime_guess.workspace = true
+rust-embed.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tokio-stream.workspace = true
+toml.workspace = true
+tower.workspace = true
+tower-http.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+ureq.workspace = true
+utoipa.workspace = true
+utoipa-axum.workspace = true
+
+[dev-dependencies]
+http-body-util = "0.1"
+tempfile.workspace = true

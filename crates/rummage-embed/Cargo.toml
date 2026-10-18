@@ -1,0 +1,15 @@
+[package]
+name = "rummage-embed"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+description = "EmbeddingGemma 2 embedding engine on llama.cpp (placeholder until Task 2 lands)"
+
+[features]
+default = ["cpu"]
+cpu = []
+vulkan = []
+rocm = []
+cuda = []
+
+[dependencies]

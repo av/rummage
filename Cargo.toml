@@ -1,0 +1,42 @@
+[workspace]
+resolver = "3"
+members = ["crates/rummage", "crates/rummage-core", "crates/rummage-embed"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+publish = false
+repository = "https://github.com/av/rummage"
+
+[workspace.dependencies]
+rummage-core = { path = "crates/rummage-core" }
+rummage-embed = { path = "crates/rummage-embed", default-features = false }
+
+anyhow = "1"
+axum = { version = "0.8", features = ["multipart"] }
+base64 = "0.22"
+clap = { version = "4.6", features = ["derive", "env"] }
+futures-util = "0.3"
+globset = "0.4"
+mime_guess = "2"
+rusqlite = { version = "0.40", features = ["bundled"] }
+rust-embed = "8"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "net", "fs"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+toml = { version = "1", features = ["preserve_order"] }
+toml_edit = "0.25"
+tower = { version = "0.5", features = ["util"] }
+tower-http = { version = "0.6", features = ["fs"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+ureq = { version = "3", features = ["json"] }
+utoipa = { version = "6", features = ["axum_extras"] }
+utoipa-axum = "0.3"
+
+[profile.release]
+lto = "thin"
+codegen-units = 4

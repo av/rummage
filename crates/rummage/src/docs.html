@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>rummage API</title>
+<style>
+  :root { color-scheme: light dark; --muted: #888; --line: #8884; }
+  body { font: 15px/1.5 system-ui, sans-serif; max-width: 960px; margin: 2rem auto; padding: 0 1rem; }
+  h1 { margin-bottom: 0; } .muted { color: var(--muted); }
+  details { border-top: 1px solid var(--line); padding: .4rem 0; }
+  summary { cursor: pointer; } summary code { font-weight: 600; }
+  .m { display: inline-block; min-width: 4.2em; font: 600 12px monospace; text-transform: uppercase; }
+  .get { color: #2a7; } .post { color: #27c; } .patch { color: #c80; } .delete { color: #c33; }
+  pre { background: #8881; padding: .6rem; overflow: auto; font-size: 13px; border-radius: 4px; }
+</style>
+</head>
+<body>
+<h1>rummage API</h1>
+<p class="muted">The full description is <a href="openapi.json">openapi.json</a> (OpenAPI 3). Click a route for its parameters and schemas.</p>
+<div id="intro"></div>
+<div id="routes">Loading…</div>
+<script>
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+fetch('openapi.json').then(r => r.json()).then(spec => {
+  document.getElementById('intro').innerHTML = `<p>${esc(spec.info.description).replace(/\n\n/g, '</p><p>')}</p><p class="muted">Version ${esc(spec.info.version)}, base URL <code>${esc(spec.servers?.[0]?.url)}</code></p>`;
+  const schemas = spec.components?.schemas ?? {};
+  const resolve = (s, depth = 0) => {
+    if (!s || depth > 6) return s;
+    if (s.$ref) { const n = s.$ref.split('/').pop(); return {[`$${n}`]: depth > 1 ? '…' : resolve(schemas[n], depth + 1)}; }
+    if (Array.isArray(s)) return s.map(x => resolve(x, depth));
+    if (typeof s === 'object') return Object.fromEntries(Object.entries(s).map(([k, v]) => [k, resolve(v, depth)]));
+    return s;
+  };
+  const out = [];
+  for (const [path, item] of Object.entries(spec.paths)) {
+    for (const [method, op] of Object.entries(item)) {
+      if (!op || typeof op !== 'object' || !op.responses) continue;
+      const params = (op.parameters ?? []).map(p => `<li><code>${esc(p.name)}</code> (${esc(p.in)}${p.required ? ', required' : ''}) ${esc(p.description)}</li>`).join('');
+      const body = op.requestBody ? `<h4>Request body</h4><pre>${esc(JSON.stringify(resolve(op.requestBody.content), null, 2))}</pre>` : '';
+      const resps = Object.entries(op.responses).map(([code, r]) => `<h4>${esc(code)} ${esc(r.description)}</h4>${r.content ? `<pre>${esc(JSON.stringify(resolve(r.content), null, 2))}</pre>` : ''}`).join('');
+      out.push(`<details><summary><span class="m ${method}">${method}</span> <code>${esc(path)}</code> <span class="muted">${esc(op.summary ?? '')}</span></summary>
+        <p>${esc(op.description ?? '')}</p>${params ? `<h4>Parameters</h4><ul>${params}</ul>` : ''}${body}${resps}</details>`);
+    }
+  }
+  document.getElementById('routes').innerHTML = out.join('');
+}).catch(e => { document.getElementById('routes').textContent = 'Could not load openapi.json: ' + e; });
+</script>
+</body>
+</html>

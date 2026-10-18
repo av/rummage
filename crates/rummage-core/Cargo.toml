@@ -1,0 +1,24 @@
+[package]
+name = "rummage-core"
+description = "Config, store, search and the Embedder trait for rummage"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+base64.workspace = true
+globset.workspace = true
+mime_guess.workspace = true
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+toml.workspace = true
+toml_edit.workspace = true
+tracing.workspace = true
+utoipa.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
