@@ -99,6 +99,8 @@
     position: relative;
     display: grid;
     place-items: center;
+    /* Full width even when the height limit cuts a tall photo's frame short. */
+    width: 100%;
     min-height: 240px;
     max-height: 66vh;
     aspect-ratio: 4 / 3;

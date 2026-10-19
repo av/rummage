@@ -39,6 +39,7 @@ function geometry(page: Page) {
   return page.evaluate(async () => {
     const img = document.querySelector<HTMLImageElement>('.panel .view img.full')!;
     const frame = img.parentElement!.getBoundingClientRect();
+    const view = img.closest('.wrap')!.getBoundingClientRect();
     const box = img.getBoundingClientRect();
     const scale = Math.min(box.width / img.naturalWidth, box.height / img.naturalHeight);
     const drawn = {
@@ -53,7 +54,7 @@ function geometry(page: Page) {
     const ctx = canvas.getContext('2d')!;
     ctx.drawImage(bitmap, 0, 0);
     const top = [...ctx.getImageData(bitmap.width / 2, 5, 1, 1).data.slice(0, 3)];
-    return { natural: [img.naturalWidth, img.naturalHeight], fit: getComputedStyle(img).objectFit, frame, box, drawn, top };
+    return { natural: [img.naturalWidth, img.naturalHeight], fit: getComputedStyle(img).objectFit, frame, view, box, drawn, top };
   });
 }
 
@@ -80,8 +81,10 @@ test('a portrait photo turned by its EXIF shows whole and upright, in a portrait
   const g = await geometry(page);
   expectWholeAndUpright(g);
   // The frame takes the photo's shape (up to its height limit), so the picture isn't shrunk
-  // into a 4:3 box.
-  expect(g.frame.height).toBeGreaterThan(g.frame.width);
+  // into a 4:3 box, and it keeps the panel's full width, the picture centred in it.
+  expect(g.frame.height).toBeGreaterThan(g.drawn.width);
+  expect(g.frame.width).toBeCloseTo(g.view.width, 0);
+  expect(g.drawn.x - g.frame.x).toBeCloseTo(g.frame.x + g.frame.width - (g.drawn.x + g.drawn.width), 0);
 });
 
 test('without a stored size the 4:3 frame still shows the whole portrait photo', async ({ page }) => {
