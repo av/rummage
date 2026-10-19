@@ -7,6 +7,7 @@
 //   MOCK_TOKEN=xyz    require a bearer token
 //   MOCK_LATENCY=50   delay search responses (ms)
 //   MOCK_FILES_URL=…  initial ui.files_url
+//   MOCK_MESSAGES=…   status messages, separated by `|`
 import { join } from 'node:path';
 import type { components } from '../src/lib/api-types';
 import { FOLDERS, HOME, makeItems, envelope, type Kind, type MockItem, type MockSegment } from './data';
@@ -29,14 +30,25 @@ const words = (s: string) => new Set(s.toLowerCase().split(/[^\p{L}\p{N}]+/u).fi
 const lower = new Map(items.map((it) => [it.id, { words: words(`${it.name} ${it.text}`), tags: it.tags }]));
 
 let filesUrl = process.env.MOCK_FILES_URL ?? '/files/files{path}';
+const messages = (process.env.MOCK_MESSAGES ?? '').split('|').filter(Boolean);
+let paused = false;
 
-type FolderState = { path: string; exclude: string[]; enabled: boolean; files: number; indexed: number; errors: number };
+type FolderState = { path: string; exclude: string[]; enabled: boolean; files: number; indexed: number; errors: number; skipped: number; scanning: boolean };
 const folders: FolderState[] = EMPTY
   ? []
   : FOLDERS.map((path) => {
       const files = items.filter((it) => it.folder === path).length;
-      return { path, exclude: [], enabled: true, files, indexed: files, errors: path.endsWith('Music') ? 2 : 0 };
+      return { path, exclude: [], enabled: true, files, indexed: files, errors: path.endsWith('Music') ? 2 : 0, skipped: path.endsWith('Videos') ? 1 : 0, scanning: false };
     });
+
+/** Files that failed or were skipped (not searchable, so not among `items`). */
+const PROBLEMS: { folder: string; name: string; kind: Kind; status: 'error' | 'skipped'; error: string }[] = EMPTY
+  ? []
+  : [
+      { folder: `${HOME}/Music`, name: 'Live at the Roundhouse.flac', kind: 'audio', status: 'error', error: 'decoding audio: invalid FLAC stream header at byte 0' },
+      { folder: `${HOME}/Music`, name: 'Voice memo 14.m4a', kind: 'audio', status: 'error', error: 'reading the file: unexpected end of file (it may still be copying)' },
+      { folder: `${HOME}/Videos`, name: 'Screen recording.mkv', kind: 'video', status: 'skipped', error: "the embedding model can't read this kind of content" },
+    ];
 
 function fid(path: string) {
   let h = 0xcbf29ce484222325n;
@@ -45,8 +57,11 @@ function fid(path: string) {
 }
 
 function counts(f: FolderState): S['IndexCounts'] {
-  return { files: f.files, indexed: f.indexed, pending: f.files - f.indexed, errors: f.errors, bytes: f.files * 3_000_000, chunks: f.indexed * 3, vectors: f.indexed * 3 };
+  return { files: f.files, indexed: f.indexed, pending: f.files - f.indexed, errors: f.errors, skipped: f.skipped, bytes: f.files * 3_000_000, chunks: f.indexed * 3, vectors: f.indexed * 3 };
 }
+
+const RATE = 600; // files per minute while indexing
+const eta = (pending: number) => (pending > 0 && !paused ? Math.ceil((pending / RATE) * 60) : null);
 
 function folderView(f: FolderState): S['Folder'] {
   return { id: fid(f.path), path: f.path, include: [], exclude: f.exclude, enabled: f.enabled, available: true, from_env: false, counts: counts(f) };
@@ -59,22 +74,23 @@ function status(): S['IndexStatus'] {
       for (const k of Object.keys(a) as (keyof S['IndexCounts'])[]) a[k] += c[k] ?? 0;
       return a;
     },
-    { files: 0, indexed: 0, pending: 0, errors: 0, bytes: 0, chunks: 0, vectors: 0 } as S['IndexCounts'],
+    { files: 0, indexed: 0, pending: 0, errors: 0, skipped: 0, bytes: 0, chunks: 0, vectors: 0 } as S['IndexCounts'],
   );
   const active = folders.filter((f) => f.enabled && f.indexed < f.files);
-  const paused = folders.length > 0 && folders.every((f) => !f.enabled);
   const pending = active.reduce((a, f) => a + f.files - f.indexed, 0);
   const kinds = new Map<Kind, number>();
   for (const it of items) kinds.set(it.kind, (kinds.get(it.kind) ?? 0) + 1);
+  const working = active.length > 0 && !paused;
   return {
-    state: paused ? 'paused' : active.length ? 'indexing' : 'idle',
+    state: paused ? 'paused' : folders.some((f) => f.scanning) ? 'scanning' : working ? 'indexing' : 'idle',
     totals,
     by_kind: [...kinds].map(([kind, files]) => ({ kind, files })),
-    folders: folders.map((f) => ({ id: fid(f.path), path: f.path, counts: counts(f) })),
-    current: active.length ? `${active[0].path}/IMG_${active[0].indexed}.jpg` : null,
+    folders: folders.map((f) => ({ id: fid(f.path), path: f.path, counts: counts(f), scanning: f.scanning && !paused, eta_secs: f.enabled ? eta(f.files - f.indexed) : null })),
+    current: working ? `${active[0].path}/IMG_${active[0].indexed}.jpg` : null,
     queued: pending,
-    files_per_min: active.length ? 600 : null,
-    eta_secs: active.length ? Math.ceil((pending / 600) * 60) : null,
+    files_per_min: working ? RATE : null,
+    eta_secs: eta(pending),
+    messages,
   };
 }
 
@@ -86,9 +102,14 @@ function publish() {
   for (const l of listeners) l(msg);
 }
 setInterval(() => {
+  if (paused) return;
   let moved = false;
   for (const f of folders) {
-    if (f.enabled && f.indexed < f.files) {
+    if (f.scanning) {
+      // A new folder is walked for a moment before its files are indexed.
+      f.scanning = false;
+      moved = true;
+    } else if (f.enabled && f.indexed < f.files) {
       f.indexed = Math.min(f.files, f.indexed + Math.max(1, Math.ceil(f.files / 40)));
       moved = true;
     }
@@ -122,6 +143,39 @@ function textScore(it: MockItem, terms: string[]) {
   return { score, keyword };
 }
 
+/** Like the server's: about `max` characters around the densest run of query words, in pieces. */
+function snippet(text: string, words: string[], max = 300): S['TextSpan'][] {
+  const matches: [number, number][] = [];
+  for (const m of text.matchAll(/[\p{L}\p{N}]+/gu)) {
+    const w = m[0].toLowerCase();
+    if (words.some((q) => w.startsWith(q))) matches.push([m.index, m.index + m[0].length]);
+  }
+  let from = 0;
+  let best = -1;
+  matches.forEach(([s], i) => {
+    const n = matches.slice(i).filter(([, e]) => e <= s + (max * 3) / 4).length;
+    if (n > best) [best, from] = [n, s];
+  });
+  if (from > max / 5) {
+    const lead = from - max / 5;
+    const sp = text.slice(lead, from).search(/\s/);
+    from = sp >= 0 ? lead + sp + 1 : from;
+  } else from = 0;
+  const to = Math.min(text.length, from + max);
+  const out: S['TextSpan'][] = [];
+  const push = (t: string, hit: boolean) => t && out.push({ text: t, hit });
+  if (from > 0) push('…', false);
+  let pos = from;
+  for (const [s, e] of matches.filter(([s, e]) => s >= from && e <= to)) {
+    push(text.slice(pos, s), false);
+    push(text.slice(s, e), true);
+    pos = e;
+  }
+  push(text.slice(pos, to), false);
+  if (to < text.length) push('…', false);
+  return out;
+}
+
 function bestSegment(it: MockItem, terms: string[], sim: number): MockSegment | null {
   if (!it.segments.length) return null;
   let best = it.segments[0];
@@ -135,8 +189,9 @@ function bestSegment(it: MockItem, terms: string[], sim: number): MockSegment | 
   } else if (it.segments.length > 1) {
     best = it.segments[Math.floor(hash(terms.join(' ') + it.id) * it.segments.length)];
   }
-  const text = best.text && best.text.length > 300 ? `${best.text.slice(0, 300)}…` : best.text;
-  return { ...best, text, score: sim };
+  if (!best.text) return { ...best, score: sim };
+  const spans = snippet(best.text, terms);
+  return { ...best, text: spans.map((s) => s.text).join(''), snippet: spans, score: sim };
 }
 
 function itemView(it: MockItem, prefix: string): S['Item'] {
@@ -325,6 +380,23 @@ async function api(req: Request, url: URL, path: string, prefix: string): Promis
   if (path === '/api/v1/health')
     return json({ status: 'ok', version: 'mock', schema_version: 1, embedder: { name: 'mock', dim: 768, modalities: { text: true, image: true, audio: true, video: true } }, uptime_secs: Math.floor((Date.now() - started) / 1000), auth_required: !!TOKEN } satisfies S['Health']);
   if (path === '/api/v1/index/status') return json(status());
+  if ((path === '/api/v1/index/pause' || path === '/api/v1/index/resume') && m === 'POST') {
+    paused = path.endsWith('pause');
+    publish();
+    return json(status());
+  }
+  if (path === '/api/v1/index/problems') {
+    const limit = Math.min(500, Math.max(1, Number(url.searchParams.get('limit') ?? 50)));
+    const list = PROBLEMS.filter((p) => folders.some((f) => f.path === p.folder));
+    return json({
+      total: list.length,
+      items: list.slice(0, limit).map((p, i) => {
+        const base = `${prefix}/api/v1/items/${900000 + i}`;
+        const t = Math.floor(started / 1000) - i * 3600;
+        return { id: 900000 + i, path: `${p.folder}/${p.name}`, name: p.name, folder_id: fid(p.folder), kind: p.kind, mime: null, size: 0, mtime: t, date: t, status: p.status, error: p.error, exif: null, urls: { thumb: `${base}/thumb`, preview: `${base}/preview`, raw: `${base}/raw` } };
+      }),
+    } satisfies S['ProblemList']);
+  }
   if (path === '/api/v1/index/events') {
     let send: (e: string) => void = () => {};
     const stream = new ReadableStream({
@@ -347,7 +419,7 @@ async function api(req: Request, url: URL, path: string, prefix: string): Promis
     const p = body.path.replace(/^~/, HOME).replace(/\/+$/, '');
     if (!p.startsWith('/')) return json({ error: 'bad_request', message: `folder path must be absolute: ${body.path}` }, 400);
     if (folders.some((f) => f.path === p)) return json({ error: 'conflict', message: `already watched: ${p}` }, 409);
-    const f: FolderState = { path: p, exclude: body.exclude ?? [], enabled: true, files: 480 + Math.floor(hash(p) * 2000), indexed: 0, errors: 0 };
+    const f: FolderState = { path: p, exclude: body.exclude ?? [], enabled: true, files: 480 + Math.floor(hash(p) * 2000), indexed: 0, errors: 0, skipped: 0, scanning: true };
     folders.push(f);
     publish();
     return json(folderView(f), 201);
@@ -376,6 +448,7 @@ async function api(req: Request, url: URL, path: string, prefix: string): Promis
   }
   if (path === '/api/v1/reindex' && m === 'POST') {
     const body = (await req.json()) as S['ReindexRequest'];
+    if (body.scope === 'problems') return json({ queued: PROBLEMS.length }, 202);
     let queued = 0;
     for (const f of folders) {
       if (body.scope === 'all' || (body.scope === 'folder' && fid(f.path) === body.id)) {

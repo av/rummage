@@ -13,6 +13,9 @@ export type Filters = S['Filters'];
 export type ItemDetail = S['ItemDetail'];
 export type Folder = S['Folder'];
 export type IndexStatus = S['IndexStatus'];
+export type FolderProgress = S['FolderProgress'];
+export type ProblemList = S['ProblemList'];
+export type ReindexRequest = S['ReindexRequest'];
 export type IndexEvent = S['IndexEvent'];
 export type DirListing = S['DirListing'];
 export type Waveform = S['Waveform'];
@@ -121,8 +124,10 @@ export const api = {
   updateFolder: (id: string, patch: { enabled?: boolean; exclude?: string[]; include?: string[] }) =>
     call<Folder>('PATCH', `api/v1/folders/${enc(id)}`, patch),
   removeFolder: (id: string) => call<void>('DELETE', `api/v1/folders/${enc(id)}`),
-  reindex: (req: { scope: 'all' } | { scope: 'folder'; id: string } | { scope: 'item'; id: number }) =>
-    call<{ queued: number }>('POST', 'api/v1/reindex', req),
+  pause: () => call<IndexStatus>('POST', 'api/v1/index/pause'),
+  resume: () => call<IndexStatus>('POST', 'api/v1/index/resume'),
+  problems: (limit = 100) => call<ProblemList>('GET', `api/v1/index/problems?limit=${limit}`),
+  reindex: (req: ReindexRequest) => call<S['ReindexResponse']>('POST', 'api/v1/reindex', req),
   dirs: (path?: string) => call<DirListing>('GET', `api/v1/fs/dirs${path ? `?path=${enc(path)}` : ''}`),
   settings: () => call<SettingsView>('GET', 'api/v1/settings'),
   patchSettings: (patch: unknown) => call<SettingsView>('PATCH', 'api/v1/settings', patch),

@@ -10,6 +10,7 @@ import {
   type Item,
   type ItemDetail,
   type Kind,
+  type ProblemList,
   type SearchHit,
   type SearchRequest,
   type SearchResponse,
@@ -55,7 +56,11 @@ class App {
   status = $state<IndexStatus | null>(null);
   folders = $state<Folder[]>([]);
   foldersLoaded = $state(false);
+  /** Files that failed to index or were skipped, newest first. */
+  problems = $state.raw<ProblemList | null>(null);
   drawerOpen = $state(false);
+  /** The drawer section to scroll to when it opens. */
+  drawerFocus = $state<'' | 'problems'>('');
   filesUrl = $state('');
   recent = $state<string[]>(loadRecent());
   needToken = $state(false);
@@ -71,6 +76,7 @@ class App {
   private toastTimer: ReturnType<typeof setTimeout> | undefined;
   private detailCtrl: AbortController | null = null;
   private stopEvents: (() => void) | null = null;
+  private problemsTimer: ReturnType<typeof setTimeout> | undefined;
   private seq = 0;
   private searching: Promise<void> | null = null;
 
@@ -109,7 +115,7 @@ class App {
     }
     this.needToken = false;
     const [status, folders, settings] = await Promise.allSettled([api.status(), api.folders(), api.settings()]);
-    if (status.status === 'fulfilled') this.status = status.value;
+    if (status.status === 'fulfilled') this.setStatus(status.value);
     if (folders.status === 'fulfilled') {
       this.folders = folders.value;
       this.foldersLoaded = true;
@@ -120,9 +126,56 @@ class App {
     this.stopEvents = api.events((e) => {
       if (e.type === 'status') {
         const { type: _, ...s } = e;
-        this.status = s;
+        this.setStatus(s);
+      } else if (e.status === 'error' || e.status === 'skipped') {
+        this.refreshProblemsSoon();
       }
     });
+  }
+
+  /** Takes a status snapshot; the problem list follows when its counts change. */
+  private setStatus(s: IndexStatus) {
+    const was = this.status ? this.status.totals.errors + (this.status.totals.skipped ?? 0) : -1;
+    this.status = s;
+    const now = s.totals.errors + (s.totals.skipped ?? 0);
+    if (now !== was) {
+      if (now === 0) this.problems = { total: 0, items: [] };
+      else this.refreshProblemsSoon();
+    }
+  }
+
+  private refreshProblemsSoon() {
+    clearTimeout(this.problemsTimer);
+    this.problemsTimer = setTimeout(() => this.refreshProblems(), 300);
+  }
+
+  async refreshProblems() {
+    clearTimeout(this.problemsTimer);
+    try {
+      this.problems = await api.problems();
+    } catch {
+      /* the status line still shows the counts */
+    }
+  }
+
+  /** Pauses or resumes all indexing; searches keep working either way. */
+  async setPaused(paused: boolean) {
+    try {
+      this.setStatus(await (paused ? api.pause() : api.resume()));
+      this.say(paused ? 'Indexing paused' : 'Indexing resumed');
+    } catch (e) {
+      this.say(e instanceof ApiError ? e.message : String(e));
+    }
+  }
+
+  /** Queues every failed or skipped file for another try. */
+  async retryProblems() {
+    try {
+      const r = await api.reindex({ scope: 'problems' });
+      this.say(r.queued ? `Trying ${r.queued === 1 ? '1 file' : `${r.queued} files`} again` : 'Nothing to retry');
+    } catch (e) {
+      this.say(e instanceof ApiError ? e.message : String(e));
+    }
   }
 
   private async tokenWorks() {
@@ -467,9 +520,11 @@ class App {
 
   // ---- folders ----
 
-  openDrawer() {
+  openDrawer(focus: '' | 'problems' = '') {
+    this.drawerFocus = focus;
     this.drawerOpen = true;
     if (!this.foldersLoaded) this.refreshFolders();
+    if (focus === 'problems' || !this.problems) this.refreshProblems();
   }
 
   // ---- misc ----

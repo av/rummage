@@ -44,9 +44,14 @@ video and audio from the matching moment, PDFs at the matching page, text at the
 - The URL holds the search (`?q=&type=&folder=&date=&in=&like=&item=`), so links and Back/Forward
   work, and other pages can link straight to results or to an open item.
 - The folder icon opens the folders drawer: add folders (paste a path or browse the server),
-  pause, exclude, reindex, and see progress live. On first run it opens by itself.
+  exclude, reindex, pause or resume all indexing, see each folder's progress and time left live,
+  and see which files could not be read and why (with a "Try again"). On first run it opens by
+  itself. Notes from the server (e.g. ffmpeg missing, the model still loading) show under the
+  search box.
 
 ![Results and preview](docs/screenshots/desktop-dark-preview.png)
+
+![Folders drawer while indexing](docs/screenshots/real-dark-drawer-indexing.png)
 
 More in [docs/screenshots](docs/screenshots).
 

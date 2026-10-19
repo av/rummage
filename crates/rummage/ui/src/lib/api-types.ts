@@ -95,6 +95,77 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/index/pause": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Pauses indexing; searches keep working. Files in progress finish first. */
+        post: operations["index_pause"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/index/problems": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Files that failed to index or were skipped, with the reason, newest first. */
+        get: operations["index_problems"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/index/resume": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Resumes indexing. */
+        post: operations["index_resume"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/index/scan": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Walks one folder (or all) for new, changed, moved and deleted files now, instead of
+         *     waiting for the periodic rescan.
+         */
+        post: operations["index_scan"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/index/status": {
         parameters: {
             query?: never;
@@ -136,7 +207,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** A rendered view of the item: a document page or a video frame (images return themselves). */
+        /**
+         * A larger view of the item: a document page (`?page=`, from 1) or a video frame (`?t=`
+         *     seconds), rendered on first request and cached. Images return themselves.
+         */
         get: operations["item_preview"];
         put?: never;
         post?: never;
@@ -187,7 +261,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** A small JPEG of the item. */
+        /**
+         * A small WebP of the item: the picture, the first page, a video poster (`?t=` picks the
+         *     window) or an audio waveform.
+         */
         get: operations["item_thumb"];
         put?: never;
         post?: never;
@@ -223,7 +300,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Queues everything, one folder, or one item for re-indexing. */
+        /** Queues everything, one folder, one item, or every failed or skipped file for re-indexing. */
         post: operations["reindex"];
         delete?: never;
         options?: never;
@@ -317,6 +394,7 @@ export interface components {
              *         ".git",
              *         "target",
              *         "dist",
+             *         "build",
              *         ".cache",
              *         "__pycache__",
              *         ".venv"
@@ -469,8 +547,15 @@ export interface components {
         };
         FolderProgress: {
             counts: components["schemas"]["IndexCounts"];
+            /**
+             * Format: int64
+             * @description Estimated seconds until this folder's waiting files are indexed, from the measured rate.
+             */
+            eta_secs?: number | null;
             id: string;
             path: string;
+            /** @description True while the folder is being walked for new and changed files. */
+            scanning?: boolean;
         };
         Health: {
             /** @description Whether API calls need a bearer token. */
@@ -504,6 +589,7 @@ export interface components {
              *       ".git",
              *       "target",
              *       "dist",
+             *       "build",
              *       ".cache",
              *       "__pycache__",
              *       ".venv"
@@ -530,6 +616,11 @@ export interface components {
             indexed: number;
             /** Format: int64 */
             pending: number;
+            /**
+             * Format: int64
+             * @description Files that can't be indexed here (e.g. videos without ffmpeg).
+             */
+            skipped?: number;
             /** Format: int64 */
             vectors: number;
         };
@@ -565,6 +656,8 @@ export interface components {
              */
             files_per_min?: number | null;
             folders: components["schemas"]["FolderProgress"][];
+            /** @description Things the user should know, e.g. that ffmpeg is missing so videos are skipped. */
+            messages?: string[];
             /**
              * Format: int64
              * @description Files waiting to be indexed.
@@ -678,6 +771,12 @@ export interface components {
             include?: string[];
             path: string;
         };
+        /** @description Files that failed to index or were skipped, newest first. */
+        ProblemList: {
+            items: components["schemas"]["Item"][];
+            /** Format: int64 */
+            total: number;
+        };
         /** @enum {string} */
         Quant: "Q8_0" | "BF16" | "F32";
         /** @description What to re-index. */
@@ -693,6 +792,9 @@ export interface components {
             id: number;
             /** @enum {string} */
             scope: "item";
+        } | {
+            /** @enum {string} */
+            scope: "problems";
         };
         ReindexResponse: {
             /**
@@ -700,6 +802,14 @@ export interface components {
              * @description Files queued.
              */
             queued: number;
+        };
+        /** @description What to re-scan for new, changed, moved and deleted files. */
+        ScanRequest: {
+            /**
+             * @description A folder id or path; empty scans every enabled folder.
+             * @default null
+             */
+            folder: string | null;
         };
         SearchHit: {
             item: components["schemas"]["Item"];
@@ -808,6 +918,11 @@ export interface components {
              * @description Similarity to the query, when there is one.
              */
             score?: number | null;
+            /**
+             * @description In search results: `text` cut into pieces, with the pieces that match the query's
+             *     words marked `hit`. Joined, the pieces equal `text`. Empty when there is no text.
+             */
+            snippet?: components["schemas"]["TextSpan"][];
             /** Format: double */
             t_end?: number | null;
             /**
@@ -850,6 +965,12 @@ export interface components {
             restart_required: string[];
             /** @description Effective settings. A set auth token shows as `********`. */
             settings: components["schemas"]["Config"];
+        };
+        /** @description A piece of a snippet. */
+        TextSpan: {
+            /** @description True when this piece matches a word of the query. */
+            hit?: boolean;
+            text: string;
         };
         UiConfig: {
             /**
@@ -1127,6 +1248,106 @@ export interface operations {
             };
         };
     };
+    index_pause: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["IndexStatus"];
+                };
+            };
+        };
+    };
+    index_problems: {
+        parameters: {
+            query?: {
+                /** @description Default 50, at most 500. */
+                limit?: number;
+                offset?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemList"];
+                };
+            };
+        };
+    };
+    index_resume: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["IndexStatus"];
+                };
+            };
+        };
+    };
+    index_scan: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ScanRequest"];
+            };
+        };
+        responses: {
+            /** @description Scan started */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description No indexer runs in this process */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
     index_status: {
         parameters: {
             query?: never;
@@ -1201,10 +1422,10 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "image/jpeg": number[];
+                    "image/webp": number[];
                 };
             };
-            /** @description No such item, or no preview yet */
+            /** @description No such item, or it has no preview */
             404: {
                 headers: {
                     [name: string]: unknown;
@@ -1303,6 +1524,8 @@ export interface operations {
             query?: {
                 /** @description Longest edge in pixels; defaults to `index.thumbnail_size`. */
                 size?: number;
+                /** @description For video: the poster of the window that holds this second. */
+                t?: number;
             };
             header?: never;
             path: {
@@ -1318,7 +1541,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "image/jpeg": number[];
+                    "image/webp": number[];
                 };
             };
             /** @description No such item, or no thumbnail yet */

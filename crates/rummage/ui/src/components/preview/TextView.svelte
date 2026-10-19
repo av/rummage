@@ -1,9 +1,16 @@
 <script lang="ts">
   import { tick } from 'svelte';
   import { media, type Item, type Segment } from '../../lib/api';
-  import { highlight } from '../../lib/highlight';
+  import { markWithin, trimSpans } from '../../lib/highlight';
 
-  let { item, segment, words }: { item: Item; segment: Segment | null; words: string[] } = $props();
+  // `segment` is the matched one from the search (its text cut to a snippet); `passage` is its
+  // whole text, once the item's details are in.
+  let {
+    item,
+    segment,
+    passage = null,
+    words,
+  }: { item: Item; segment: Segment | null; passage?: string | null; words: string[] } = $props();
 
   /** Larger files show only the matched passage. */
   const MAX = 2 * 1024 * 1024;
@@ -30,9 +37,20 @@
     return () => ctrl.abort();
   });
 
+  const spans = $derived(segment?.snippet ?? []);
+  /** The matched passage, or the snippet without its "…" when the whole passage isn't known. */
+  const chunk = $derived(
+    passage?.trim() ||
+      (spans.length
+        ? trimSpans(spans)
+            .map((s) => s.text)
+            .join('')
+        : segment?.text?.replace(/^…|…$/g, '').trim()) ||
+      '',
+  );
+
   /** Where the matched passage sits in the file. */
   const span = $derived.by(() => {
-    const chunk = segment?.text?.replace(/…$/, '').trim();
     if (text == null || !chunk) return null;
     let at = text.indexOf(chunk);
     let len = chunk.length;
@@ -49,12 +67,12 @@
   });
 </script>
 
-{#snippet marked(s: string)}{#each highlight(s, words) as p, i (i)}{#if p.hit}<mark>{p.text}</mark>{:else}{p.text}{/if}{/each}{/snippet}
+{#snippet marked(s: string)}{#each markWithin(s, spans, words) as p, i (i)}{#if p.hit}<mark>{p.text}</mark>{:else}{p.text}{/if}{/each}{/snippet}
 
 <div class="text">
-  {#if error === 'big' || (error && segment?.text)}
+  {#if error === 'big' || (error && chunk)}
     {#if error !== 'big'}<p class="note">{error} Showing the matched passage.</p>{:else}<p class="note">This file is large; showing the matched passage. Use "Open" for all of it.</p>{/if}
-    <pre><span class="hit">{@render marked(segment?.text ?? '')}</span></pre>
+    <pre><span class="hit">{@render marked(chunk)}</span></pre>
   {:else if error}
     <p class="note">Can't show this file: {error}</p>
   {:else if text == null}

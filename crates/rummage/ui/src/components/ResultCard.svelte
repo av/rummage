@@ -13,7 +13,8 @@
   const seg = $derived(hit.segment);
   const at = $derived(where(seg, item.kind));
   const folder = $derived(dirname(item.path).split('/').pop() || '/');
-  const snippet = $derived(seg?.text ?? '');
+  // The server marks the words that matched; names without a passage are marked here.
+  const parts = $derived(seg?.snippet?.length ? seg.snippet : highlight(seg?.text || item.name, words));
 
   let loaded = $state(false);
   let failed = $state(false);
@@ -90,7 +91,7 @@
       <span class="badge"><AudioLines size={12} />{at || 'Audio'}</span>
     {:else}
       <p class="snippet">
-        {#each highlight(snippet || item.name, words) as part, i (i)}{#if part.hit}<mark>{part.text}</mark>{:else}{part.text}{/if}{/each}
+        {#each parts as part, i (i)}{#if part.hit}<mark>{part.text}</mark>{:else}{part.text}{/if}{/each}
       </p>
       <span class="badge soft">
         {#if item.kind === 'doc'}<FileType size={12} />{:else}<FileText size={12} />{/if}

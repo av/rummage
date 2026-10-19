@@ -139,7 +139,7 @@
             {:else if item.kind === 'doc'}
               <DocView {item} bind:page {segments} />
             {:else}
-              <TextView {item} segment={p.segment} {words} />
+              <TextView {item} segment={p.segment} passage={segments.find((s) => s.id === p.segment?.id)?.text ?? null} {words} />
             {/if}
           </div>
         {/key}

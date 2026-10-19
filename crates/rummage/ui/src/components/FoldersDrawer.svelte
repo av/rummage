@@ -1,9 +1,9 @@
 <script lang="ts">
-  import { X, Pause, Play, RefreshCw, Trash2, FolderTree, SlidersHorizontal, TriangleAlert } from '@lucide/svelte';
+  import { X, Pause, Play, RefreshCw, RotateCcw, Trash2, FolderTree, SlidersHorizontal, TriangleAlert } from '@lucide/svelte';
   import { tick } from 'svelte';
-  import { api, ApiError, type Folder } from '../lib/api';
+  import { api, ApiError, type Folder, type FolderProgress } from '../lib/api';
   import { app } from '../lib/app.svelte';
-  import { eta, num, plural } from '../lib/format';
+  import { dirname, eta, num, plural } from '../lib/format';
   import DirBrowser from './DirBrowser.svelte';
 
   let { onclose }: { onclose: () => void } = $props();
@@ -19,18 +19,42 @@
   let filesUrl = $state(app.filesUrl);
   let savedFilesUrl = $state(false);
   let pathInput = $state<HTMLInputElement>();
+  let problemsTitle = $state<HTMLElement>();
 
   const first = $derived(app.foldersLoaded && !app.folders.length);
   const fromEnv = $derived(app.folders.some((f) => f.from_env));
-  const rate = $derived(app.status?.files_per_min ?? 0);
+  const s = $derived(app.status);
+  const paused = $derived(s?.state === 'paused');
+  const pending = $derived(s ? s.queued || s.totals.pending : 0);
+  const problems = $derived(app.problems?.total ? app.problems : null);
+
+  // Opened to show the files that could not be read: focus goes there instead of the path box.
+  const toProblems = app.drawerFocus === 'problems';
 
   $effect(() => {
     if (first) browsing = true;
-    tick().then(() => pathInput?.focus());
+    tick().then(() => {
+      if (!toProblems) pathInput?.focus();
+    });
   });
 
-  function counts(f: Folder) {
-    return app.status?.folders.find((p) => p.id === f.id)?.counts ?? f.counts;
+  // Go to the list of those files once it is there.
+  $effect(() => {
+    if (app.drawerFocus === 'problems' && problemsTitle) {
+      problemsTitle.scrollIntoView({ block: 'start' });
+      problemsTitle.focus({ preventScroll: true });
+      app.drawerFocus = '';
+    }
+  });
+
+  /** A folder's live progress from the index status, or its counts from the folder list. */
+  function progress(f: Folder): FolderProgress {
+    return app.status?.folders.find((p) => p.id === f.id) ?? { id: f.id, path: f.path, counts: f.counts, scanning: false, eta_secs: null };
+  }
+
+  function showProblems() {
+    app.drawerFocus = 'problems';
+    app.refreshProblems();
   }
 
   async function add(p: string) {
@@ -121,10 +145,31 @@
       {/if}
     {/if}
 
+    {#if app.folders.length && s}
+      <div class="global" class:paused>
+        <span class="dot" class:live={!paused && (s.state !== 'idle' || pending > 0)} aria-hidden="true"></span>
+        <span class="what">
+          {#if paused}
+            Indexing is paused{#if pending}; {plural(pending, 'file')} waiting{/if}. Search still works.
+          {:else if s.state === 'scanning' && !pending}
+            Looking for new and changed files…
+          {:else if pending}
+            Indexing {plural(pending, 'file')}{#if s.eta_secs}{` · ${eta(s.eta_secs)} left`}{/if}
+          {:else}
+            Everything is indexed.
+          {/if}
+        </span>
+        <button class="btn sm" type="button" onclick={() => app.setPaused(!paused)}>
+          {#if paused}<Play size={14} />Resume indexing{:else}<Pause size={14} />Pause indexing{/if}
+        </button>
+      </div>
+    {/if}
+
     {#if app.folders.length}
       <ul class="folders">
         {#each app.folders as f (f.id)}
-          {@const c = counts(f)}
+          {@const fp = progress(f)}
+          {@const c = fp.counts}
           {@const pct = c.files ? (100 * c.indexed) / c.files : 0}
           <li class="folder">
             <div class="row">
@@ -137,6 +182,10 @@
                   <span class="tag bad"><TriangleAlert size={12} />Not found</span>
                 {:else if !f.enabled}
                   <span class="tag">Paused</span>
+                {:else if fp.scanning}
+                  <span class="tag live">Scanning</span>
+                {:else if c.pending > 0 && paused}
+                  <span class="tag">Waiting</span>
                 {:else if c.pending > 0}
                   <span class="tag live">Indexing</span>
                 {:else}
@@ -149,13 +198,18 @@
             </div>
             <p class="meta num">
               {num(c.indexed)} of {plural(c.files, 'file')} indexed
-              {#if c.pending > 0 && f.enabled && rate > 0}· {eta((c.pending / rate) * 60)} left{/if}
-              {#if c.errors}· <span class="warn">{num(c.errors)} could not be read</span>{/if}
+              {#if fp.scanning}· looking for new and changed files{/if}
+              {#if c.pending > 0 && f.enabled && !paused && fp.eta_secs}· {eta(fp.eta_secs)} left{/if}
+              {#if c.errors || c.skipped}·
+                <button class="link warn" type="button" onclick={showProblems}>
+                  {#if c.errors}{num(c.errors)} could not be read{/if}{#if c.errors && c.skipped}{', '}{/if}{#if c.skipped}{num(c.skipped)} skipped{/if}
+                </button>
+              {/if}
               {#if f.exclude.length}· {plural(f.exclude.length, 'exclusion')}{/if}
             </p>
             {#if !f.from_env}
               <div class="acts">
-                <button class="btn sm ghost" type="button" onclick={() => act(f, () => api.updateFolder(f.id, { enabled: !f.enabled }), f.enabled ? 'Paused' : 'Resumed')}>
+                <button class="btn sm ghost" type="button" title={f.enabled ? 'Stop indexing and watching this folder' : 'Index and watch this folder again'} onclick={() => act(f, () => api.updateFolder(f.id, { enabled: !f.enabled }), f.enabled ? 'Paused' : 'Resumed')}>
                   {#if f.enabled}<Pause size={14} />Pause{:else}<Play size={14} />Resume{/if}
                 </button>
                 <button class="btn sm ghost" type="button" onclick={() => act(f, () => api.reindex({ scope: 'folder', id: f.id }), 'Reindexing')}><RefreshCw size={14} />Reindex</button>
@@ -188,6 +242,30 @@
       {#if !fromEnv}
         <button class="btn sm" type="button" onclick={() => api.reindex({ scope: 'all' }).then(() => app.say('Reindexing everything'))}><RefreshCw size={14} />Reindex everything</button>
       {/if}
+    {/if}
+
+    {#if problems}
+      <section class="problems" aria-labelledby="problems-title">
+        <div class="sec-head">
+          <h3 id="problems-title" tabindex="-1" bind:this={problemsTitle}>Not indexed <span class="count num">{num(problems.total)}</span></h3>
+          <button class="btn sm" type="button" onclick={() => app.retryProblems()}><RotateCcw size={14} />Try again</button>
+        </div>
+        <ul>
+          {#each problems.items as it (it.id)}
+            <li>
+              <div class="pname">
+                <strong title={it.path}>{it.name}</strong>
+                <span class="tag" class:bad={it.status === 'error'}>{it.status === 'skipped' ? 'Skipped' : "Can't read"}</span>
+              </div>
+              <span class="parent" title={it.path}>{dirname(it.path)}</span>
+              {#if it.error}<span class="why" title={it.error}>{it.error}</span>{/if}
+            </li>
+          {/each}
+        </ul>
+        {#if problems.total > problems.items.length}
+          <p class="hint">The newest {num(problems.items.length)} of {num(problems.total)}.</p>
+        {/if}
+      </section>
     {/if}
 
     <section class="settings">
@@ -363,8 +441,115 @@
     font-size: 12.5px;
     color: var(--muted);
   }
+  .link {
+    border: 0;
+    background: none;
+    padding: 0;
+    font: inherit;
+    text-decoration: underline;
+    text-underline-offset: 2px;
+  }
   .warn {
     color: var(--warn);
+  }
+  .global {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 12px;
+    border-radius: var(--radius);
+    background: var(--surface-2);
+    font-size: 13.5px;
+    color: var(--text-2);
+  }
+  .global .what {
+    flex: 1;
+  }
+  .global .btn {
+    flex: none;
+  }
+  .dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 999px;
+    background: var(--ok);
+    flex: none;
+  }
+  .paused .dot {
+    background: var(--muted);
+  }
+  .dot.live {
+    background: var(--accent);
+    animation: pulse 1.6s ease-in-out infinite;
+  }
+  @keyframes pulse {
+    50% {
+      opacity: 0.35;
+    }
+  }
+  .problems {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .sec-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+  }
+  .sec-head h3 {
+    margin: 0;
+    font-size: 14px;
+    font-weight: 600;
+    outline: none;
+    scroll-margin-top: 16px;
+  }
+  .count {
+    color: var(--muted);
+    font-weight: 500;
+  }
+  .problems ul {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--surface);
+  }
+  .problems li {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    padding: 8px 12px;
+    min-width: 0;
+  }
+  .problems li + li {
+    border-top: 1px solid var(--border);
+  }
+  .pname {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    min-width: 0;
+  }
+  .pname strong {
+    font-weight: 600;
+    font-size: 13.5px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .why {
+    font-size: 12.5px;
+    color: var(--text-2);
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    overflow-wrap: anywhere;
   }
   .acts {
     display: flex;
