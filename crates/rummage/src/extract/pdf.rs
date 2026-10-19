@@ -37,6 +37,7 @@ pub fn extract(path: &Path, ctx: &Ctx, sink: &mut Sink) -> Result<Outcome> {
         }
     }
     let mut meta = Meta::default();
+    let mut any_page = false;
     if ctx.tools.pdftoppm {
         let count = pages.len().clamp(1, MAX_PAGE_IMAGES);
         let tmp = TempDir::new("pdf")?;
@@ -60,6 +61,12 @@ pub fn extract(path: &Path, ctx: &Ctx, sink: &mut Sink) -> Result<Outcome> {
             if page == 1 {
                 meta.thumb = Some(thumb::thumbnail(&img, ctx.thumb_size));
             }
+            // An empty page embeds as a picture of nothing, which sits close to every query
+            // and topped unrelated searches; its text (if any) is indexed above.
+            if is_blank(&img.to_luma8()) {
+                continue;
+            }
+            any_page = true;
             let rgb = img.to_rgb8();
             sink(Piece {
                 chunk: ChunkRow {
@@ -81,10 +88,25 @@ pub fn extract(path: &Path, ctx: &Ctx, sink: &mut Sink) -> Result<Outcome> {
                 .into(),
         ));
     }
-    if !any_text && meta.thumb.is_none() {
+    if !any_text && !any_page {
         text::emit_passages(&title, "", None, sink)?;
     }
     Ok(Outcome::Done(meta))
+}
+
+/// Whether a page is empty: fewer than 0.05% of its pixels stand out from its background (the
+/// most common grey level, so dark slides count too).
+fn is_blank(img: &image::GrayImage) -> bool {
+    let mut hist = [0usize; 256];
+    for p in img.pixels() {
+        hist[p.0[0] as usize] += 1;
+    }
+    let bg = (0..256).max_by_key(|&v| hist[v]).unwrap_or(255) as i32;
+    let ink: usize = (0..256)
+        .filter(|&v| (v as i32 - bg).abs() > 48)
+        .map(|v| hist[v])
+        .sum();
+    ink * 2000 < (img.width() * img.height()) as usize
 }
 
 fn page_number(p: &Path) -> Option<usize> {
@@ -133,4 +155,35 @@ pub fn render_page(path: &Path, page: u32) -> Result<Vec<u8>> {
         .arg(path))?;
     let img = image::load_from_memory(&png).context("reading the rendered page")?;
     Ok(thumb::webp(&img.to_rgb8()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn blank_pages() {
+        let white = image::GrayImage::from_pixel(100, 140, image::Luma([255]));
+        assert!(is_blank(&white));
+        let dark = image::GrayImage::from_pixel(100, 140, image::Luma([20]));
+        assert!(is_blank(&dark));
+        // A lone page number (5 pixels) is still empty.
+        let mut numbered = white.clone();
+        for x in 0..5 {
+            numbered.put_pixel(50 + x, 130, image::Luma([0]));
+        }
+        assert!(is_blank(&numbered));
+        // One line of text (100 pixels, 0.7%) is not.
+        let mut text = white.clone();
+        for x in 0..100 {
+            text.put_pixel(x, 20, image::Luma([0]));
+        }
+        assert!(!is_blank(&text));
+        // Light grey text on a white page counts as ink too.
+        let mut grey = white;
+        for x in 0..100 {
+            grey.put_pixel(x, 20, image::Luma([180]));
+        }
+        assert!(!is_blank(&grey));
+    }
 }
