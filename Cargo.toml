@@ -25,7 +25,7 @@ kamadak-exif = "0.6"
 lopdf = { version = "0.45", default-features = false }
 mime_guess = "2"
 notify = { version = "8", default-features = false }
-rusqlite = { version = "0.40", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled", "functions"] }
 rust-embed = "8"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }

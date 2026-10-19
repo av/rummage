@@ -151,6 +151,20 @@ pub struct ItemUrls {
     pub thumb: String,
     pub preview: String,
     pub raw: String,
+    /// For a video in a codec browsers often can't play (HEVC, for one): an H.264 copy made
+    /// on first request (202 with [`PlayStatus`] until it is ready). Absent when the original
+    /// plays everywhere, or `playback.convert` is off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub play: Option<String>,
+}
+
+/// Progress of a video's playable copy, while it is being made.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct PlayStatus {
+    /// `converting`, or `waiting` for another conversion to finish.
+    pub state: String,
+    /// How much is done, 0 to 1, when known.
+    pub progress: Option<f32>,
 }
 
 /// A matched part of a file: a passage, a page or a time window.

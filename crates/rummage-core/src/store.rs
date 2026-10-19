@@ -4,6 +4,7 @@ use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
 
 use anyhow::{Context, Result};
+use rusqlite::functions::FunctionFlags;
 use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::types::{Kind, SegmentKind};
@@ -77,6 +78,42 @@ CREATE TABLE settings (
     key    TEXT PRIMARY KEY,
     value  TEXT NOT NULL
 );
+"#,
+    // 2: the keyword index stems words ("claps" finds "Clap") and adds the camelCase parts of
+    // names and paths ("SpiralPetalia" as "Spiral Petalia"). Rebuilds only the keyword index
+    // from the stored text; nothing is re-embedded.
+    r#"
+DROP TRIGGER chunks_ai;
+DROP TRIGGER chunks_ad;
+DROP TRIGGER chunks_au;
+DROP TRIGGER files_au;
+DROP TABLE fts;
+
+CREATE VIRTUAL TABLE fts USING fts5(
+    name, path, text, exif,
+    tokenize = 'porter unicode61 remove_diacritics 2'
+);
+INSERT INTO fts(rowid, name, path, text, exif)
+SELECT c.id, name_words(f.name), name_words(f.path), coalesce(c.text, ''), coalesce(f.exif, '')
+FROM chunks c JOIN files f ON f.id = c.file_id;
+
+CREATE TRIGGER chunks_ai AFTER INSERT ON chunks BEGIN
+    INSERT INTO fts(rowid, name, path, text, exif)
+    SELECT new.id, name_words(f.name), name_words(f.path), coalesce(new.text, ''),
+           coalesce(f.exif, '')
+    FROM files f WHERE f.id = new.file_id;
+END;
+CREATE TRIGGER chunks_ad AFTER DELETE ON chunks BEGIN
+    DELETE FROM fts WHERE rowid = old.id;
+END;
+CREATE TRIGGER chunks_au AFTER UPDATE OF text ON chunks BEGIN
+    UPDATE fts SET text = coalesce(new.text, '') WHERE rowid = new.id;
+END;
+CREATE TRIGGER files_au AFTER UPDATE OF name, path, exif ON files BEGIN
+    UPDATE fts SET name = name_words(new.name), path = name_words(new.path),
+                   exif = coalesce(new.exif, '')
+    WHERE rowid IN (SELECT id FROM chunks WHERE file_id = new.id);
+END;
 "#,
 ];
 
@@ -199,6 +236,13 @@ impl Store {
     }
 
     fn init(conn: Connection) -> Result<Self> {
+        // The keyword index's triggers call it, so every connection that writes needs it.
+        conn.create_scalar_function(
+            "name_words",
+            1,
+            FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
+            |ctx| Ok(name_words(&ctx.get::<String>(0)?)),
+        )?;
         conn.pragma_update(None, "foreign_keys", true)?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
@@ -798,21 +842,75 @@ fn chunk_row(r: &rusqlite::Row) -> rusqlite::Result<ChunkRow> {
     })
 }
 
-/// Turns free text into an FTS5 query: every word must appear (as a prefix for the last one).
+/// A file name or path for the keyword index: `text`, then the parts of its camelCase words, so
+/// they match on their own ("SpiralPetalia.mp4" adds "Spiral Petalia", "HTMLParser" adds
+/// "HTML Parser"). Letters and digits stay together: splitting them would make the pieces of
+/// ids and hashes ("5a5d0521") match number queries.
+pub fn name_words(text: &str) -> String {
+    let mut out = text.to_string();
+    for word in text.split(|c: char| !c.is_alphanumeric()) {
+        let chars: Vec<(usize, char)> = word.char_indices().collect();
+        let mut start = 0;
+        let mut parts = vec![];
+        for (i, w) in chars.windows(2).enumerate() {
+            let ((_, a), (at, b)) = (w[0], w[1]);
+            let next_lower = chars.get(i + 2).is_some_and(|(_, c)| c.is_lowercase());
+            if (a.is_lowercase() && b.is_uppercase())
+                || (a.is_uppercase() && b.is_uppercase() && next_lower)
+            {
+                parts.push(&word[start..at]);
+                start = at;
+            }
+        }
+        if !parts.is_empty() {
+            parts.push(&word[start..]);
+            for p in parts {
+                out.push(' ');
+                out.push_str(p);
+            }
+        }
+    }
+    out
+}
+
+/// Turns free text into an FTS5 query: every word must appear. The index stems words, and the
+/// query's are stemmed the same way ("claps" matches "clap"). The last word also matches as a
+/// prefix, for search as you type, unless it ends like a whole word ("singing", "hats"): its
+/// stem as a prefix would match unrelated words ("sing*" finds "single", "hat*" finds "hate").
 fn fts_query(text: &str) -> Option<String> {
-    let words: Vec<String> = text
+    let words: Vec<&str> = text
         .split(|c: char| !c.is_alphanumeric())
         .filter(|w| !w.is_empty())
-        .map(|w| format!("\"{w}\""))
         .collect();
-    let (last, rest) = words.split_last()?;
-    let mut q = rest.join(" ");
-    if !q.is_empty() {
-        q.push(' ');
+    let (last, _) = words.split_last()?;
+    let lower = last.to_lowercase();
+    let prefix = without_ending(&lower).len() == lower.len();
+    let mut q: Vec<String> = words.iter().map(|w| format!("\"{w}\"")).collect();
+    if prefix {
+        q.last_mut().expect("not empty").push('*');
     }
-    q.push_str(last);
-    q.push('*');
-    Some(q)
+    Some(q.join(" "))
+}
+
+/// A lowercase word without a plural or "-ing"/"-ed" ending, keeping at least 3 letters
+/// ("claps" gives "clap", "boxes" "box", "walking" "walk"); else the word itself. A rough
+/// stand-in for the keyword index's stemmer, for marking matches and spotting whole words.
+pub fn without_ending(w: &str) -> &str {
+    let keep = |suffix: &str| w.strip_suffix(suffix).filter(|s| s.chars().count() >= 3);
+    let es = ["ses", "xes", "zes", "ches", "shes"]
+        .iter()
+        .any(|e| w.ends_with(e));
+    if let Some(s) = keep("ies").or_else(|| keep("ing")).or_else(|| keep("ed")) {
+        s
+    } else if es && let Some(s) = keep("es") {
+        s
+    } else if !["ss", "us", "is"].iter().any(|e| w.ends_with(e))
+        && let Some(s) = keep("s")
+    {
+        s
+    } else {
+        w
+    }
 }
 
 #[cfg(test)]
@@ -992,9 +1090,111 @@ mod tests {
     }
 
     #[test]
+    fn name_words_split_camel_case() {
+        assert_eq!(
+            name_words("SpiralPetalia.mp4"),
+            "SpiralPetalia.mp4 Spiral Petalia"
+        );
+        assert_eq!(name_words("HTMLParser_v2"), "HTMLParser_v2 HTML Parser");
+        assert_eq!(name_words("Kick808 5a5d0521"), "Kick808 5a5d0521");
+        assert_eq!(name_words("plain name-2026.txt"), "plain name-2026.txt");
+        assert_eq!(name_words("ŻółwGrün"), "ŻółwGrün Żółw Grün");
+    }
+
+    /// Stems plurals and other endings, splits names on `_`, `-` and camelCase, and still
+    /// matches codes and numbers exactly.
+    #[test]
+    fn keyword_matching_stems_and_splits_names() {
+        let s = Store::open_in_memory().unwrap();
+        let add = |path: &str, text: &str| {
+            let id = s.upsert_file(&file(path, Kind::Text)).unwrap();
+            s.insert_chunk(&ChunkRow {
+                file_id: id,
+                kind: SegmentKind::Text,
+                text: Some(text.into()),
+                ..Default::default()
+            })
+            .unwrap();
+            id
+        };
+        let clap = add("/data/Kit_Clap_01.wav", "");
+        let kick = add("/data/BigKick-Hard_808.wav", "");
+        let art = add("/data/out/SpiralPetalia.mp4", "");
+        let inv = add(
+            "/data/bill.md",
+            "Invoice INV-2023-0042 failed with ERR_CONNECTION_REFUSED (0x80070005)",
+        );
+        let walk = add("/data/notes.md", "we went walking by the lakes");
+        let files = |q: &str| -> Vec<i64> {
+            let mut v: Vec<i64> = s
+                .keyword_search(q, 10)
+                .unwrap()
+                .into_iter()
+                .map(|(_, f)| f)
+                .collect();
+            v.sort();
+            v
+        };
+        assert_eq!(files("claps"), vec![clap]);
+        assert_eq!(files("clap"), vec![clap]);
+        assert_eq!(files("kicks"), vec![kick]);
+        assert_eq!(files("808"), vec![kick]);
+        assert_eq!(files("hard kick"), vec![kick]);
+        assert_eq!(files("bigkick"), vec![kick]);
+        assert_eq!(files("petalia"), vec![art]);
+        assert_eq!(files("spiral petalia"), vec![art]);
+        assert_eq!(files("spiralpetalia"), vec![art]);
+        assert_eq!(files("invoices"), vec![inv]);
+        assert_eq!(files("INV-2023-0042"), vec![inv]);
+        assert!(files("INV-2023-0043").is_empty());
+        assert_eq!(files("ERR_CONNECTION_REFUSED"), vec![inv]);
+        assert_eq!(files("0x80070005"), vec![inv]);
+        assert!(files("0x80070006").is_empty());
+        assert_eq!(files("walk lake"), vec![walk]);
+        assert_eq!(files("walking"), vec![walk]);
+        assert_eq!(files("lakes"), vec![walk]);
+        // Typing: a partial last word matches as a prefix.
+        assert_eq!(files("petal"), vec![art]);
+        assert_eq!(files("invo"), vec![inv]);
+
+        // Renames reach the index through the trigger.
+        s.rename_file(art, "/data/out/CrimsonLace.mp4").unwrap();
+        assert!(files("petalia").is_empty());
+        assert_eq!(files("lace"), vec![art]);
+    }
+
+    /// An index made before the keyword index stemmed gets its keyword index rebuilt, with
+    /// vectors and everything else untouched.
+    #[test]
+    fn migration_rebuilds_the_keyword_index_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("r.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(MIGRATIONS[0]).unwrap();
+            conn.pragma_update(None, "user_version", 1).unwrap();
+            conn.execute_batch(
+                "INSERT INTO files (id, path, name, folder, size, mtime, kind, status)
+                 VALUES (1, '/d/Kit_Clap_01.wav', 'Kit_Clap_01.wav', '/d', 1, 1, 'audio', 'indexed');
+                 INSERT INTO chunks (id, file_id, kind, text) VALUES (7, 1, 'audio', NULL);
+                 INSERT INTO vectors (chunk_id, dim, blob) VALUES (7, 1, x'0000803f');",
+            )
+            .unwrap();
+        }
+        let s = Store::open(&path).unwrap();
+        assert_eq!(s.schema_version().unwrap(), SCHEMA_VERSION);
+        assert_eq!(s.keyword_search("claps", 10).unwrap(), vec![(7, 1)]);
+        assert_eq!(s.vectors_for_file(1).unwrap(), vec![(7, vec![1.0])]);
+    }
+
+    #[test]
     fn fts_query_escapes_input() {
         assert_eq!(fts_query("hello wor").unwrap(), "\"hello\" \"wor\"*");
         assert_eq!(fts_query("\"); DROP").unwrap(), "\"DROP\"*");
         assert!(fts_query("  -- ").is_none());
+        // A last word with an ending is whole: no prefix.
+        assert_eq!(fts_query("woman Singing").unwrap(), "\"woman\" \"Singing\"");
+        assert_eq!(fts_query("hi-hats").unwrap(), "\"hi\" \"hats\"");
+        assert_eq!(fts_query("glass").unwrap(), "\"glass\"*");
     }
 }

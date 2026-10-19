@@ -286,6 +286,10 @@ fn serve(cf: ConfigFile, bind: Option<String>, base_path: Option<String>) -> Res
     let svc = engine::open_service(cf, true)?;
     let rt = tokio::runtime::Runtime::new()?;
     let indexer = indexer::start(svc.clone(), indexer::Options { watch: true })?;
+    let prep = svc.clone();
+    std::thread::Builder::new()
+        .name("playable".into())
+        .spawn(move || crate::extract::playable::prepare(prep))?;
     let served = rt.block_on(server::serve(svc, &bind));
     indexer.stop();
     served

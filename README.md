@@ -127,6 +127,9 @@ defaults below. The same keys are readable and writable with `rummage config get
 | `index.skip` | `node_modules, .git, target, dist, build, .cache, __pycache__, .venv` | `RUMMAGE_SKIP` (comma list) | Directory names skipped everywhere |
 | `ui.files_url` | `""` | `RUMMAGE_FILES_URL` | Link for "Open in Files" in the web UI, e.g. `/files/files{path}`; `{path}` is the file's absolute path, `{dir}` its folder. Empty hides it |
 | `tools.ffmpeg` | `""` | `RUMMAGE_FFMPEG` | The ffmpeg program for video and HEIC/AVIF photos; ffprobe is taken from the same folder. Empty means `ffmpeg` and `ffprobe` on `PATH` |
+| `playback.convert` | `true` | `RUMMAGE_PLAYBACK_CONVERT` | Make an H.264 copy of videos browsers often can't play (HEVC, for one), so the web page can show them (see below) |
+| `playback.prepare` | `true` | `RUMMAGE_PLAYBACK_PREPARE` | Also make those copies ahead of time in the background, at the lowest priority and one at a time, while the indexer is idle |
+| `playback.cache_mb` | `4096` | `RUMMAGE_PLAYBACK_CACHE_MB` | Most disk space the copies may use, in MB (at least 64); the least recently played go first. The background stops at three quarters of it |
 
 Each `[[folders]]` entry has `path`, `include` and `exclude` (globs relative to the folder;
 an empty `include` means everything) and `enabled`:
@@ -194,6 +197,7 @@ Everything the UI does goes through `/api/v1`. The OpenAPI description is at
 | `GET /api/v1/items/{id}/thumb` | WebP thumbnail (`?size=`; `?t=` picks a video window's poster) |
 | `GET /api/v1/items/{id}/preview` | A document page (`?page=`) or a video frame (`?t=`), WebP |
 | `GET /api/v1/items/{id}/raw` | The file, with range requests for audio/video seeking |
+| `GET /api/v1/items/{id}/play` | A video in a form browsers play: for one with `urls.play`, its H.264 copy (202 with `{"state","progress"}` until it is made), else the file; ranges as for `raw` |
 | `GET /api/v1/items/{id}/similar` | More like this (`?type=image,video&limit=`) |
 | `GET /api/v1/items/{id}/waveform` | Peak levels of an audio or video file (`?points=`), for drawing a waveform |
 | `GET\|PATCH /api/v1/settings` | The config keys; PATCH takes a JSON merge patch |
@@ -239,12 +243,24 @@ library beside the binary. A video codec that the installed ffmpeg can't decode 
 
 Search embeds the query (`task: search result | query: …`), scores every stored vector exactly
 (all vectors are held in memory, at `model.dim` length, and updated as files are indexed), runs
-an FTS5 keyword search over names, paths, text and EXIF, and fuses the two rankings with
+an FTS5 keyword search over names, paths, text and EXIF (words are stemmed, so "claps" finds
+`Clap_01.wav` and "invoices" finds "invoice"; names also match by their camelCase parts, so
+"petalia" finds `SpiralPetalia.mp4`), and fuses the two rankings with
 reciprocal-rank fusion. Results are grouped per file with the best-matching segment, so a video
 hit carries the moment and a PDF hit the page; text hits carry a snippet with the matching
 words marked. Thumbnails (WebP, `index.thumbnail_size`) are made while indexing; page and frame
 previews are rendered on first request. Both live under `<data_dir>/thumbs` and
 `<data_dir>/previews`.
+
+Videos in a codec that browsers don't all play (anything but H.264, VP8, VP9 and AV1, as the
+indexer's ffprobe found it, or any AVI) get a playable copy: H.264 and AAC in a fast-start MP4,
+at most 1280 pixels on the long edge and 60 frames a second, made with the configured ffmpeg
+(x264, else OpenH264; CPU only) under `<data_dir>/playable`. The web page asks for it when the
+browser can't play the original (HEVC phone videos in Chrome or Firefox on Linux, for example),
+shows the progress while it is made (a minute of 1080p HEVC takes 7 to 11 s on a 16-core
+machine), then plays it from the matched moment; if it can't be made, it plays the original
+and says when only the sound comes through. `GET /api/v1/items/{id}/raw` always sends the
+original.
 
 ## Development
 

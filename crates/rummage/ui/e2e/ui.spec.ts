@@ -267,6 +267,20 @@ test.describe('search page', () => {
     await expect(page.locator('.panel .track svg.wave')).toBeVisible();
   });
 
+  test('HEVC videos play from the copy the server makes on first open', async ({ page }) => {
+    const res = await page.request.post('api/v1/search', { data: { query: 'video', filters: { types: ['video'] }, limit: 100 } });
+    const hevc = ((await res.json()).hits as { item: { id: number; urls: { play?: string } } }[]).filter((h) => h.item.urls.play);
+    expect(hevc.length).toBeGreaterThan(1);
+    // The last one: no other test opens it, so its copy isn't made yet.
+    await page.goto(`?q=video&type=video&item=${hevc[hevc.length - 1].item.id}`);
+    await expect(page.getByText(/Preparing this video for the browser/)).toBeVisible();
+    const video = page.locator('.panel video');
+    await expect(video).toHaveAttribute('src', /\/play/);
+    await expect.poll(() => video.evaluate((v: HTMLVideoElement) => v.videoWidth), { timeout: 10000 }).toBeGreaterThan(0);
+    await expect(page.getByText(/Preparing this video/)).toBeHidden();
+    await expect(page.getByText(/can't show this video's picture/)).toBeHidden();
+  });
+
   test('says what to do when nothing matches or the server is down', async ({ page }) => {
     await page.goto('?q=zzqxv');
     await expect(page.getByText('No matches for “zzqxv”')).toBeVisible();

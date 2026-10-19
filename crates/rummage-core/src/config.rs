@@ -26,6 +26,7 @@ pub struct Config {
     pub index: IndexConfig,
     pub ui: UiConfig,
     pub tools: ToolsConfig,
+    pub playback: PlaybackConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
@@ -151,6 +152,30 @@ pub struct ToolsConfig {
     pub ffmpeg: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct PlaybackConfig {
+    /// Make an H.264 copy of videos that browsers often can't play (HEVC phone videos in
+    /// Chrome on Linux, for one), so the web UI can show them. Needs ffmpeg.
+    pub convert: bool,
+    /// Also make those copies ahead of time in the background (niced, one at a time), not
+    /// only when a video is first opened.
+    pub prepare: bool,
+    /// Most disk space the copies may use, in MB (under `<data_dir>/playable`); the least
+    /// recently played go first.
+    pub cache_mb: u64,
+}
+
+impl Default for PlaybackConfig {
+    fn default() -> Self {
+        Self {
+            convert: true,
+            prepare: true,
+            cache_mb: 4096,
+        }
+    }
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -162,6 +187,7 @@ impl Default for Config {
             index: IndexConfig::default(),
             ui: UiConfig::default(),
             tools: ToolsConfig::default(),
+            playback: PlaybackConfig::default(),
         }
     }
 }
@@ -245,6 +271,9 @@ pub const ENV_OVERRIDES: &[(&str, &str)] = &[
     ("RUMMAGE_SKIP", "index.skip"),
     ("RUMMAGE_FILES_URL", "ui.files_url"),
     ("RUMMAGE_FFMPEG", "tools.ffmpeg"),
+    ("RUMMAGE_PLAYBACK_CONVERT", "playback.convert"),
+    ("RUMMAGE_PLAYBACK_PREPARE", "playback.prepare"),
+    ("RUMMAGE_PLAYBACK_CACHE_MB", "playback.cache_mb"),
 ];
 
 /// Keys that only take effect after a restart of `rummage serve`.
@@ -289,6 +318,11 @@ impl Config {
         ensure!(
             bp.is_empty() || (bp.starts_with('/') && !bp.contains("//") && !bp.contains('?')),
             "server.base_path must be empty or start with '/' (got {bp:?})"
+        );
+        ensure!(
+            self.playback.cache_mb >= 64,
+            "playback.cache_mb must be at least 64 (got {})",
+            self.playback.cache_mb
         );
         ensure!(
             !self.data_dir.trim().is_empty(),
@@ -748,6 +782,7 @@ dim = 256
         assert_eq!(c.model.dim, 256);
         assert_eq!(c.model_file(), "embeddinggemma-2-BF16.gguf");
         assert_eq!(c.index.thumbnail_size, 320);
+        assert_eq!(c.playback, PlaybackConfig::default());
     }
 
     #[test]
@@ -760,6 +795,7 @@ dim = 256
                 ("RUMMAGE_FOLDERS", "/a:/b"),
                 ("RUMMAGE_BACKEND", "vulkan"),
                 ("RUMMAGE_SKIP", "node_modules, .git"),
+                ("RUMMAGE_PLAYBACK_CONVERT", "off"),
             ],
         );
         let mut cf = cf.unwrap();
@@ -775,6 +811,7 @@ dim = 256
             vec!["/a", "/b"]
         );
         assert_eq!(c.index.skip, vec!["node_modules", ".git"]);
+        assert!(!c.playback.convert);
         assert!(cf.env_overrides().contains(&"server.bind".to_string()));
 
         cf.set("index.thumbnail_size", "512").unwrap();
@@ -793,6 +830,8 @@ dim = 256
         let (_d, cf) = load("", &[("RUMMAGE_DIM", "lots")]);
         assert!(cf.is_err());
         let (_d, cf) = load("", &[("RUMMAGE_BIND", "nowhere")]);
+        assert!(cf.is_err());
+        let (_d, cf) = load("[playback]\ncache_mb = 10\n", &[]);
         assert!(cf.is_err());
     }
 

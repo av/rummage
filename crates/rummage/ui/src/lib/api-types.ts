@@ -200,6 +200,27 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/items/{id}/play": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The video in a form browsers play. For a video in a codec they often can't play (see
+         *     `urls.play`), an H.264 copy, made on the first request: until it is ready the answer is
+         *     202 with the progress, so ask again. Other videos send the file itself.
+         */
+        get: operations["item_play"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/items/{id}/preview": {
         parameters: {
             query?: never;
@@ -414,6 +435,14 @@ export interface components {
              *     }
              */
             model: components["schemas"]["ModelConfig"];
+            /**
+             * @default {
+             *       "convert": true,
+             *       "prepare": true,
+             *       "cache_mb": 4096
+             *     }
+             */
+            playback: components["schemas"]["PlaybackConfig"];
             /**
              * @default {
              *       "bind": "127.0.0.1:8099",
@@ -710,6 +739,12 @@ export interface components {
         };
         /** @description Links for showing an item. They include the server's base path. */
         ItemUrls: {
+            /**
+             * @description For a video in a codec browsers often can't play (HEVC, for one): an H.264 copy made
+             *     on first request (202 with [`PlayStatus`] until it is ready). Absent when the original
+             *     plays everywhere, or `playback.convert` is off.
+             */
+            play?: string | null;
             preview: string;
             raw: string;
             thumb: string;
@@ -776,6 +811,37 @@ export interface components {
             exclude?: string[];
             include?: string[];
             path: string;
+        };
+        /** @description Progress of a video's playable copy, while it is being made. */
+        PlayStatus: {
+            /**
+             * Format: float
+             * @description How much is done, 0 to 1, when known.
+             */
+            progress?: number | null;
+            /** @description `converting`, or `waiting` for another conversion to finish. */
+            state: string;
+        };
+        PlaybackConfig: {
+            /**
+             * Format: int64
+             * @description Most disk space the copies may use, in MB (under `<data_dir>/playable`); the least
+             *     recently played go first.
+             * @default 4096
+             */
+            cache_mb: number;
+            /**
+             * @description Make an H.264 copy of videos that browsers often can't play (HEVC phone videos in
+             *     Chrome on Linux, for one), so the web UI can show them. Needs ffmpeg.
+             * @default true
+             */
+            convert: boolean;
+            /**
+             * @description Also make those copies ahead of time in the background (niced, one at a time), not
+             *     only when a video is first opened.
+             * @default true
+             */
+            prepare: boolean;
         };
         /** @description Files that failed to index or were skipped, newest first. */
         ProblemList: {
@@ -1405,6 +1471,62 @@ export interface operations {
                 };
             };
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    item_play: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Item id */
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The playable copy (or the original), with range support */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "video/mp4": number[];
+                };
+            };
+            /** @description The copy is being made; ask again shortly */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PlayStatus"];
+                };
+            };
+            /** @description The requested byte range */
+            206: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Not a video, or the copy can't be made (the message says why) */
+            415: {
                 headers: {
                     [name: string]: unknown;
                 };

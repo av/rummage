@@ -4,6 +4,7 @@
 pub mod audio;
 pub mod image;
 pub mod pdf;
+pub mod playable;
 pub mod render;
 pub mod text;
 pub mod thumb;
@@ -176,6 +177,19 @@ fn ffmpeg_programs(path: &str) -> (PathBuf, PathBuf) {
 /// A command running ffmpeg.
 pub fn ffmpeg() -> Command {
     Command::new(&FFMPEG.get_or_init(|| ffmpeg_programs("")).0)
+}
+
+/// A command running ffmpeg at the lowest CPU priority (through `nice`, where there is one).
+pub fn ffmpeg_niced() -> Command {
+    static NICE: OnceLock<bool> = OnceLock::new();
+    let program = &FFMPEG.get_or_init(|| ffmpeg_programs("")).0;
+    if *NICE.get_or_init(|| works(Command::new("nice").arg("true"))) {
+        let mut cmd = Command::new("nice");
+        cmd.args(["-n", "19"]).arg(program);
+        cmd
+    } else {
+        Command::new(program)
+    }
 }
 
 /// A command running ffprobe.

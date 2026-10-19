@@ -209,9 +209,17 @@ function itemView(it: MockItem, prefix: string): S['Item'] {
     status: 'indexed',
     error: null,
     exif: it.exif as S['Item']['exif'],
-    urls: { thumb: `${base}/thumb`, preview: `${base}/preview`, raw: `${base}/raw` },
+    urls: {
+      thumb: `${base}/thumb`,
+      preview: `${base}/preview`,
+      raw: `${base}/raw`,
+      ...(it.exif?.codec_name === 'hevc' ? { play: `${base}/play` } : {}),
+    },
   };
 }
+
+/** How many times each video's playable copy was asked for: it is "made" by the third. */
+const playAsks = new Map<number, number>();
 
 function globRe(g: string) {
   let re = '';
@@ -342,6 +350,7 @@ function settings(): S['SettingsView'] {
       index: { concurrency: 0, scan_interval_secs: 3600, thumbnail_size: 320, skip: ['node_modules', '.git'] },
       ui: { files_url: filesUrl },
       tools: { ffmpeg: '' },
+      playback: { convert: true, prepare: true, cache_mb: 4096 },
     },
     config_path: `${HOME}/.config/rummage/config.toml`,
     env_overrides: [],
@@ -516,6 +525,14 @@ async function api(req: Request, url: URL, path: string, prefix: string): Promis
       if (it.kind === 'audio') return ranged(req, new Blob([wav(it) as BlobPart]), 'audio/wav');
       if (it.kind === 'doc') return new Response(pdf(it) as BodyInit, { headers: { 'content-type': 'application/pdf', ...disp } });
       return new Response(it.text, { headers: { 'content-type': 'text/markdown; charset=utf-8', ...disp } });
+    }
+    if (sub === '/play') {
+      if (it.kind !== 'video') return json({ error: 'unsupported', message: `item ${it.id} is not a video` }, 415);
+      const n = (playAsks.get(it.id) ?? 0) + 1;
+      playAsks.set(it.id, n);
+      if (it.exif?.codec_name === 'hevc' && n <= 2)
+        return json({ state: 'converting', progress: n / 3 } satisfies S['PlayStatus'], 202);
+      return ranged(req, Bun.file(VIDEO), 'video/webm');
     }
     if (sub === '/waveform') {
       if (it.kind !== 'audio' && it.kind !== 'video') return json({ error: 'unsupported', message: `item ${it.id} is not audio or video` }, 415);

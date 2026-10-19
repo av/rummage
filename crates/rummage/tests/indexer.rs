@@ -381,6 +381,57 @@ async fn indexes_every_kind_and_follows_changes() {
         );
         let (code, _, _) = get(&app, &format!("/api/v1/items/{}/preview?t=5", video.id)).await;
         assert_eq!(code, StatusCode::OK, "frame");
+
+        // The clip is MPEG-4 part 2, which browsers don't play: it gets an H.264 copy, made
+        // on the first request (202 with progress until then), then served with ranges.
+        let play = video.urls.play.clone().expect("a play link");
+        assert_eq!(play, format!("/api/v1/items/{}/play", video.id));
+        let (code, _, body) = get(&app, &play).await;
+        assert_eq!(code, StatusCode::ACCEPTED);
+        let st: PlayStatus = serde_json::from_slice(&body).unwrap();
+        assert!(
+            ["waiting", "converting"].contains(&st.state.as_str()),
+            "{st:?}"
+        );
+        let started = Instant::now();
+        let copy = loop {
+            let (code, ctype, body) = get(&app, &play).await;
+            if code == StatusCode::OK {
+                assert_eq!(ctype, "video/mp4");
+                break body;
+            }
+            assert_eq!(
+                code,
+                StatusCode::ACCEPTED,
+                "{}",
+                String::from_utf8_lossy(&body)
+            );
+            assert!(started.elapsed() < Duration::from_secs(60), "copy too slow");
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        };
+        let at = |box_type: &[u8]| copy.windows(4).position(|w| w == box_type).unwrap();
+        assert!(at(b"moov") < at(b"mdat"), "fast start");
+        let codecs = rummage::extract::run(
+            rummage::extract::ffprobe()
+                .args(["-v", "error", "-show_entries", "stream=codec_name"])
+                .args(["-of", "csv=p=0"])
+                .arg(rummage::extract::playable::copy_path(&svc, video.id)),
+        )
+        .unwrap();
+        assert_eq!(String::from_utf8_lossy(&codecs).trim(), "h264\naac");
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::get(&play)
+                    .header(header::RANGE, "bytes=0-99")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::PARTIAL_CONTENT);
+        // Browser-safe videos and other kinds have no play link.
+        assert!(beach.urls.play.is_none());
     }
     let (code, _, body) = get(&app, "/api/v1/index/problems").await;
     assert_eq!(code, StatusCode::OK);

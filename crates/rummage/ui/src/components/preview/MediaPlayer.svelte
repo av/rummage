@@ -1,7 +1,7 @@
 <script lang="ts">
   // Video or audio with its own controls, so the matched windows can be marked on the scrubber.
   import { Play, Pause, Volume2, VolumeX, Maximize, AudioLines } from '@lucide/svelte';
-  import { media, type Item } from '../../lib/api';
+  import { api, ApiError, isAbort, media, type Item } from '../../lib/api';
   import { clock } from '../../lib/format';
   import { waveform, type Wave } from '../../lib/waveform';
   import Waveform from '../Waveform.svelte';
@@ -26,12 +26,63 @@
   let noPicture = $state(false);
   let dragging = false;
 
+  // Videos in a codec browsers often can't play (HEVC) have an H.264 copy the server makes on
+  // first request (`urls.play`). Use it unless this browser says it plays the codec, or when
+  // the original turns out to have no picture.
+  let pictureless = $state(false);
+  const viaCopy = $derived(isVideo && !!item.urls.play && (pictureless || !playsCodec(item)));
+  let copy = $state<'wait' | 'ready' | 'failed'>('wait');
+  let copyProgress = $state<number | null>(null);
+  /** Where to start once the copy is ready, if the user picked a moment meanwhile. */
+  let resume: number | null = null;
+  const src = $derived(
+    !viaCopy || copy === 'failed' ? media(item.urls.raw) : copy === 'ready' ? media(item.urls.play!) : undefined,
+  );
+
+  function playsCodec(it: Item): boolean {
+    const codec = (it.exif as Record<string, unknown> | null)?.codec_name;
+    if (codec !== 'hevc') return false;
+    return document.createElement('video').canPlayType('video/mp4; codecs="hvc1.1.6.L93.B0"') === 'probably';
+  }
+
+  $effect(() => {
+    if (!viaCopy || !item.urls.play) return;
+    const ctrl = new AbortController();
+    const u = item.urls.play;
+    (async () => {
+      // A dropped request is asked again; the server saying no is final.
+      let dropped = 0;
+      for (;;) {
+        try {
+          const s = await api.playable(u, ctrl.signal);
+          if (s.ready) {
+            copy = 'ready';
+            return;
+          }
+          copyProgress = s.progress;
+        } catch (e) {
+          if (isAbort(e)) return;
+          if (!(e instanceof ApiError && e.code === 'network' && ++dropped < 5)) {
+            copy = 'failed';
+            return;
+          }
+        }
+        await new Promise((r) => setTimeout(r, 700));
+        if (ctrl.signal.aborted) return;
+      }
+    })();
+    return () => ctrl.abort();
+  });
+
   $effect(() => {
     if (!isVideo) waveform(item, 300, true).then((w) => (wave = w));
   });
 
   $effect(() => {
-    if (seekTo != null && el) {
+    if (seekTo != null && el && !src) {
+      resume = seekTo;
+      seekTo = null;
+    } else if (seekTo != null && el) {
       el.currentTime = seekTo;
       el.play().catch(() => {});
       seekTo = null;
@@ -43,8 +94,19 @@
   function onloaded() {
     if (!el) return;
     dur = el.duration;
-    if (start > 0 && start < el.duration) el.currentTime = start;
+    const at = resume ?? start;
+    resume = null;
+    if (at > 0 && at < el.duration) el.currentTime = at;
     el.play().catch(() => {});
+  }
+
+  function pictureCheck(e: Event) {
+    const v = e.currentTarget as HTMLVideoElement;
+    noPicture = v.videoWidth === 0;
+    if (noPicture && item.urls.play && !viaCopy) {
+      resume = v.currentTime || null;
+      pictureless = true;
+    }
   }
 
   function toggle() {
@@ -95,7 +157,7 @@
     <!-- svelte-ignore a11y_media_has_caption -->
     <video
       bind:this={el}
-      src={media(item.urls.raw)}
+      {src}
       poster={media(item.urls.preview, { t: Math.floor(start) })}
       preload="metadata"
       playsinline
@@ -103,7 +165,7 @@
       bind:paused
       bind:muted
       onloadedmetadata={onloaded}
-      onloadeddata={(e) => (noPicture = e.currentTarget.videoWidth === 0)}
+      onloadeddata={pictureCheck}
       onerror={() => (failed = true)}
       onclick={toggle}
     ></video>
@@ -121,6 +183,10 @@
   {/if}
   {#if failed}
     <p class="failed">This file can't be played here. It may be gone, or in a format the browser can't play. Try "Open".</p>
+  {:else if viaCopy && copy === 'wait'}
+    <p class="failed" role="status">
+      Preparing this video for the browser{copyProgress != null ? `: ${Math.round(copyProgress * 100)}%` : ''}…
+    </p>
   {:else if noPicture}
     <p class="failed">This browser can't show this video's picture (phone videos are often HEVC), so only its sound plays. "Download" it to watch it in a video player.</p>
   {/if}

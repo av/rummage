@@ -129,6 +129,29 @@ export const api = {
   problems: (limit = 100) => call<ProblemList>('GET', `api/v1/index/problems?limit=${limit}`),
   reindex: (req: ReindexRequest) => call<S['ReindexResponse']>('POST', 'api/v1/reindex', req),
   dirs: (path?: string) => call<DirListing>('GET', `api/v1/fs/dirs${path ? `?path=${enc(path)}` : ''}`),
+  /**
+   * Whether a video's playable copy (`urls.play`) is ready; if not, how far making it has got
+   * (0 to 1, or null). Throws an ApiError when it can't be made.
+   */
+  playable: async (u: string, signal?: AbortSignal): Promise<{ ready: boolean; progress: number | null }> => {
+    let res: Response;
+    try {
+      res = await fetch(media(u), { headers: { Range: 'bytes=0-0' }, signal });
+    } catch (e) {
+      if (isAbort(e)) throw e;
+      throw new ApiError('network', "Can't reach the rummage server.");
+    }
+    const body = await res.text();
+    if (res.status === 202) return { ready: false, progress: (JSON.parse(body) as S['PlayStatus']).progress ?? null };
+    if (res.ok) return { ready: true, progress: 1 };
+    let err: { error?: string; message?: string } = {};
+    try {
+      err = JSON.parse(body);
+    } catch {
+      /* not JSON */
+    }
+    throw new ApiError(err.error ?? 'internal', err.message ?? `${res.status} ${res.statusText}`, res.status);
+  },
   settings: () => call<SettingsView>('GET', 'api/v1/settings'),
   patchSettings: (patch: unknown) => call<SettingsView>('PATCH', 'api/v1/settings', patch),
   /** Live index events; reconnects on its own. */

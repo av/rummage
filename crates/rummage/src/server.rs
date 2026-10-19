@@ -22,6 +22,7 @@ use utoipa::{Modify, OpenApi, ToSchema};
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
+use crate::extract::playable::{self, Play};
 use crate::extract::render;
 
 /// Largest request body accepted (search-by-file uploads).
@@ -119,6 +120,7 @@ pub fn api_router() -> OpenApiRouter<Arc<AppState>> {
         .routes(routes!(item_thumb))
         .routes(routes!(item_preview))
         .routes(routes!(item_raw))
+        .routes(routes!(item_play))
         .routes(routes!(item_similar))
         .routes(routes!(item_waveform))
         .routes(routes!(list_dirs))
@@ -596,6 +598,41 @@ async fn item_raw(
         resp.headers_mut().insert(header::CONTENT_DISPOSITION, v);
     }
     Ok(resp)
+}
+
+/// The video in a form browsers play. For a video in a codec they often can't play (see
+/// `urls.play`), an H.264 copy, made on the first request: until it is ready the answer is
+/// 202 with the progress, so ask again. Other videos send the file itself.
+#[utoipa::path(get, path = "/items/{id}/play", tag = "items",
+    params(("id" = i64, Path, description = "Item id")),
+    responses(
+        (status = 200, content_type = "video/mp4", body = Vec<u8>,
+            description = "The playable copy (or the original), with range support"),
+        (status = 202, body = PlayStatus, description = "The copy is being made; ask again shortly"),
+        (status = 206, description = "The requested byte range"),
+        (status = 404, body = ApiError),
+        (status = 415, body = ApiError,
+            description = "Not a video, or the copy can't be made (the message says why)"),
+    ))]
+async fn item_play(
+    State(st): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+    req: Request,
+) -> ApiResult<Response> {
+    let svc = st.svc.clone();
+    match blocking(move || playable::play(&svc, id)).await? {
+        Play::Original => item_raw(State(st), Path(id), req).await,
+        Play::Ready(path) => serve_file(path, "video/mp4", req).await,
+        Play::Pending(status) => Ok((
+            StatusCode::ACCEPTED,
+            [
+                (header::RETRY_AFTER, "1"),
+                (header::CACHE_CONTROL, "no-store"),
+            ],
+            Json(status),
+        )
+            .into_response()),
+    }
 }
 
 async fn serve_file(path: std::path::PathBuf, mime: &str, req: Request) -> ApiResult<Response> {

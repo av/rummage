@@ -195,6 +195,8 @@ export function makeItems(n: number): MockItem[] {
       it.size = 30_000_000 + Math.floor(r() * 200_000_000);
       it.tags = [...SCENES[scene].tags, ...extra, 'video'];
       it.duration = 20;
+      // Every other video is HEVC, which gets a playable copy (`urls.play`).
+      it.exif = { codec_name: id % 2 ? 'h264' : 'hevc', width: 1920, height: 1080, duration: it.duration };
       for (let t = 0; t < it.duration; t += 4)
         it.segments.push({ id: segId++, kind: 'video', page: null, t_start: t, t_end: Math.min(it.duration, t + 4), text: null, score: null });
     } else if (kind === 'audio') {

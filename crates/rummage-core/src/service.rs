@@ -13,7 +13,7 @@ use tokio::sync::broadcast;
 use crate::config::{Config, ConfigFile, FolderConfig, expand_home, needs_restart};
 use crate::embed::{EmbedInput, EmbedQueue, Embedder, ImageData, dot, fnv1a, normalize};
 use crate::probes::PROBES;
-use crate::store::{ChunkRow, FileContent, FileRow, Scope, Store};
+use crate::store::{ChunkRow, FileContent, FileRow, Scope, Store, without_ending};
 use crate::types::*;
 use crate::vindex::VectorIndex;
 
@@ -280,10 +280,10 @@ impl Service {
         Ok(())
     }
 
-    /// Deletes the cached thumbnails and previews of a file.
+    /// Deletes the cached thumbnails, previews and playable copy of a file.
     pub fn clear_renders(&self, file_id: i64) {
         let data = self.config().data_dir();
-        for dir in ["thumbs", "previews"] {
+        for dir in ["thumbs", "previews", "playable"] {
             let _ = std::fs::remove_dir_all(data.join(dir).join(file_id.to_string()));
         }
     }
@@ -705,6 +705,9 @@ impl Service {
                 thumb: format!("{base}/thumb"),
                 preview: format!("{base}/preview"),
                 raw: format!("{base}/raw"),
+                play: (needs_playable_copy(f)
+                    && self.config.read().unwrap().config().playback.convert)
+                    .then(|| format!("{base}/play")),
             },
         }
     }
@@ -1203,14 +1206,35 @@ impl Service {
     }
 }
 
+/// Video codecs every current browser plays.
+const BROWSER_VIDEO_CODECS: &[&str] = &["h264", "vp8", "vp9", "av1"];
+
+/// Whether a video needs an H.264 copy to play in browsers: its codec (as the indexer probed
+/// it) isn't one they all play, or it is in an AVI file. Unknown codecs count as playable.
+pub fn needs_playable_copy(f: &FileRow) -> bool {
+    if f.kind != Kind::Video {
+        return false;
+    }
+    let codec = f
+        .exif
+        .as_deref()
+        .and_then(|e| serde_json::from_str::<serde_json::Value>(e).ok())
+        .and_then(|e| e["codec_name"].as_str().map(str::to_string));
+    let avi = Path::new(&f.path)
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("avi"));
+    codec.is_some_and(|c| avi || !BROWSER_VIDEO_CODECS.contains(&c.as_str()))
+}
+
 /// Longest snippet returned with a search hit, in characters.
 const SNIPPET_CHARS: usize = 300;
 
-/// The words of a query, lowercased, for highlighting.
+/// The words of a query, lowercased and without common English endings, for highlighting: the
+/// keyword index stems words, so "invoices" finds and marks "invoice".
 fn query_words(q: &str) -> Vec<String> {
     q.split(|c: char| !c.is_alphanumeric())
         .filter(|w| !w.is_empty())
-        .map(|w| w.to_lowercase())
+        .map(|w| without_ending(&w.to_lowercase()).to_string())
         .collect()
 }
 
@@ -1350,6 +1374,14 @@ mod tests {
         assert_eq!(
             render(&snippet("Zürich straße", &query_words("STRASSE zür"), 50)),
             "[Zürich] straße"
+        );
+        assert_eq!(
+            render(&snippet(
+                "One invoice, two boxes; we walked by the class.",
+                &query_words("invoices box walking classes"),
+                100
+            )),
+            "One [invoice], two [boxes]; we [walked] by the [class]."
         );
     }
 }
