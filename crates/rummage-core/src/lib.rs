@@ -3,6 +3,7 @@
 
 pub mod config;
 pub mod embed;
+pub mod probes;
 pub mod service;
 pub mod store;
 pub mod types;

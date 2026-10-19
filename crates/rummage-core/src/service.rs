@@ -4,7 +4,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, RwLock};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
@@ -12,6 +12,7 @@ use tokio::sync::broadcast;
 
 use crate::config::{Config, ConfigFile, FolderConfig, expand_home, needs_restart};
 use crate::embed::{EmbedInput, EmbedQueue, Embedder, ImageData, dot, fnv1a, normalize};
+use crate::probes::PROBES;
 use crate::store::{ChunkRow, FileContent, FileRow, Scope, Store};
 use crate::types::*;
 use crate::vindex::VectorIndex;
@@ -156,6 +157,8 @@ pub struct Service {
     /// Loaded on first search, then updated as files are indexed; with the store's
     /// `data_version` at load time (another process writing forces a reload).
     vectors: RwLock<Option<(VectorIndex, i64)>>,
+    /// The probe queries' vectors ([`crate::probes`]), embedded on the first text search.
+    probes: OnceLock<Vec<Vec<f32>>>,
     live: Mutex<Live>,
     paused: AtomicBool,
     link: RwLock<Option<IndexLink>>,
@@ -179,6 +182,7 @@ impl Service {
             embeds: EmbedQueue::new(embedder),
             events,
             vectors: RwLock::new(None),
+            probes: OnceLock::new(),
             live: Mutex::new(Live::default()),
             paused: AtomicBool::new(false),
             link: RwLock::new(None),
@@ -1020,8 +1024,12 @@ impl Service {
         if let Some(qv) = &qv
             && req.mode != SearchMode::Keyword
         {
+            let text = req.query.is_some();
+            if text {
+                self.probe_vectors();
+            }
             vector_hits = self
-                .with_vectors(|ix| ix.search(qv, pool, ok))?
+                .with_vectors(|ix| ix.search(qv, pool, text, ok))?
                 .into_iter()
                 .map(|h| (h.file_id, h.chunk_id, h.score))
                 .collect();
@@ -1123,14 +1131,43 @@ impl Service {
         ))
     }
 
+    /// The probe queries' vectors, embedding them the first time; `None` if that fails.
+    fn probe_vectors(&self) -> Option<&Vec<Vec<f32>>> {
+        if let Some(p) = self.probes.get() {
+            return Some(p);
+        }
+        let started = Instant::now();
+        let inputs: Vec<EmbedInput> = PROBES
+            .iter()
+            .map(|q| EmbedInput::Query((*q).to_string()))
+            .collect();
+        match self.embeds.query(&inputs) {
+            Ok(mut vs) => {
+                vs.iter_mut().for_each(|v| normalize(v));
+                tracing::debug!(
+                    "embedded {} ranking probes in {:.0} ms",
+                    vs.len(),
+                    started.elapsed().as_secs_f64() * 1000.0
+                );
+                Some(self.probes.get_or_init(|| vs))
+            }
+            Err(e) => {
+                tracing::warn!("can't embed the ranking probes; ranking by kind: {e:#}");
+                None
+            }
+        }
+    }
+
     /// Runs `f` on the in-memory vectors, loading them first if needed (or if another process
-    /// changed the database since).
+    /// changed the database since), and calibrating them once the probes are embedded.
     fn with_vectors<R>(&self, f: impl FnOnce(&VectorIndex) -> R) -> Result<R> {
         let version = self.store.data_version()?;
+        let probes = self.probes.get();
         {
             let guard = self.vectors.read().unwrap();
             if let Some((ix, v)) = guard.as_ref()
                 && *v == version
+                && (probes.is_none() || ix.has_probes())
             {
                 return Ok(f(ix));
             }
@@ -1150,7 +1187,19 @@ impl Service {
             );
             *guard = Some((ix, version));
         }
-        Ok(f(&guard.as_ref().expect("loaded above").0))
+        let ix = &mut guard.as_mut().expect("loaded above").0;
+        if let Some(p) = probes
+            && !ix.has_probes()
+        {
+            let started = Instant::now();
+            ix.set_probes(p);
+            tracing::debug!(
+                "calibrated {} vectors in {:.0} ms",
+                ix.len(),
+                started.elapsed().as_secs_f64() * 1000.0
+            );
+        }
+        Ok(f(ix))
     }
 }
 
