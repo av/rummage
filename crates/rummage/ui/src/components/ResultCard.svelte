@@ -18,16 +18,21 @@
 
   let loaded = $state(false);
   let failed = $state(false);
-  let triedThumb = $state(false);
+  let triedPoster = $state(false);
   let wave = $state<Wave | null | undefined>(undefined);
 
+  // A video shows the matched window's poster, saved while indexing (small, no ffmpeg run), and
+  // falls back to rendering that frame.
   const src = $derived.by(() => {
-    if (item.kind === 'video' && seg?.t_start != null && !triedThumb) return media(item.urls.preview, { t: Math.floor(seg.t_start) });
+    if (item.kind === 'video' && seg?.t_start != null) {
+      const t = Math.floor(seg.t_start);
+      return triedPoster ? media(item.urls.preview, { t }) : media(item.urls.thumb, { t });
+    }
     return media(item.urls.thumb);
   });
 
   function onerror() {
-    if (item.kind === 'video' && !triedThumb) triedThumb = true;
+    if (item.kind === 'video' && seg?.t_start != null && !triedPoster) triedPoster = true;
     else failed = true;
   }
 
