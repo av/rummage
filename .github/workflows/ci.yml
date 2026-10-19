@@ -16,12 +16,24 @@ jobs:
   check:
     name: fmt, clippy, test (cpu)
     runs-on: ubuntu-latest
+    env:
+      # EmbeddingGemma 2 GGUFs for the rummage-embed parity test (downloaded once, then cached).
+      RUMMAGE_EMBED_MODEL_DIR: /home/runner/.cache/rummage-models
     steps:
       - uses: actions/checkout@v5
+        with:
+          submodules: true
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      - name: Install ffmpeg (video item of the parity test)
+        run: sudo apt-get update -q && sudo apt-get install -y -q --no-install-recommends ffmpeg
+      - name: Cache model files
+        uses: actions/cache@v4
+        with:
+          path: /home/runner/.cache/rummage-models
+          key: embeddinggemma-2-gguf-q8_0-bfcd2987
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --features rummage/cpu --locked -- -D warnings
       - run: cargo test --workspace --features rummage/cpu --locked

@@ -1,0 +1,4 @@
+[submodule "crates/rummage-embed/llama.cpp"]
+	path = crates/rummage-embed/llama.cpp
+	url = https://github.com/ggml-org/llama.cpp
+	shallow = true
