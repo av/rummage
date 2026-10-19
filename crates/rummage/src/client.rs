@@ -66,6 +66,23 @@ impl Api {
         }
     }
 
+    pub fn update_folder(&self, id: &str, patch: &FolderPatch) -> Result<Folder> {
+        match self {
+            Api::Remote(c) => c.send("PATCH", &format!("/folders/{}", url_escape(id)), patch),
+            Api::Local(s) => Ok(s.update_folder(id, patch.clone())?),
+        }
+    }
+
+    pub fn item(&self, id: i64, query: Option<&str>) -> Result<ItemDetail> {
+        match self {
+            Api::Remote(c) => c.get(&match query {
+                Some(q) => format!("/items/{id}?q={}", url_escape(q)),
+                None => format!("/items/{id}"),
+            }),
+            Api::Local(s) => Ok(s.item(id, query, "")?),
+        }
+    }
+
     pub fn remove_folder(&self, id: &str) -> Result<()> {
         match self {
             Api::Remote(c) => c.delete(&format!("/folders/{}", url_escape(id))),

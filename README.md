@@ -151,6 +151,8 @@ Keys under `data_dir`, `server`, `model`, `engine`, `tools` and `index.concurren
 ```
 rummage serve [--bind ADDR] [--base-path PATH]     run the web UI and the API
 rummage folders add <path> [--exclude GLOB]... [--include GLOB]...
+rummage folders set <path|id> [--off | --on] [--exclude GLOB]... [--include GLOB]...
+                                                   turn a folder off or on, or replace its globs
 rummage folders rm <path|id>                       stop indexing; drops it from the index, not the disk
 rummage folders ls [--json]
 rummage index [--once | --watch]                   index now; --watch keeps following changes
@@ -161,6 +163,7 @@ rummage search <query...> | --similar ID | --file PATH
                [--type KIND,...] [--folder PATH|ID]... [--path GLOB]
                [--after YYYY-MM-DD] [--before YYYY-MM-DD] [--mode hybrid|vector|keyword]
                [--limit N] [--json]
+rummage item <id> [--query Q] [--json]             one item and its passages, pages or time windows
 rummage status [--json] [--errors]                 counts per kind and folder; --errors lists failures
 rummage config get [key] | set <key> <value> | path
 rummage doctor

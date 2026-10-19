@@ -628,6 +628,27 @@ async fn cli_client_talks_to_a_live_server() {
                 ..Default::default()
             })
             .unwrap();
+        // What `rummage item` and `rummage folders set` send.
+        let d = api.item(r.hits[0].item.id, Some("invoice")).unwrap();
+        assert_eq!(d.item.name, "tax.md");
+        assert!(d.segments[0].score.is_some());
+        let docs = config.parent().unwrap().join("docs");
+        let added = api
+            .add_folder(NewFolder {
+                path: docs.to_string_lossy().into_owned(),
+                include: vec![],
+                exclude: vec![],
+                enabled: true,
+            })
+            .unwrap();
+        let patch = FolderPatch {
+            enabled: Some(false),
+            exclude: Some(vec!["**/*.tmp".into()]),
+            include: None,
+        };
+        let f = api.update_folder(&added.id, &patch).unwrap();
+        assert!(!f.enabled);
+        assert_eq!(f.exclude, ["**/*.tmp"]);
         // Discovery finds the same server from the config file.
         let cf = ConfigFile::load_with_env(&config, |_| None).unwrap();
         let found = Api::connect(cf, Some(&base), false).unwrap();

@@ -48,7 +48,7 @@ pub enum Cmd {
         #[arg(long, value_name = "PATH")]
         base_path: Option<String>,
     },
-    /// Add, remove or list the folders to index.
+    /// Add, change, remove or list the folders to index.
     #[command(subcommand)]
     Folders(FoldersCmd),
     /// Index the folders now.
@@ -80,6 +80,17 @@ pub enum Cmd {
     },
     /// Search the index.
     Search(SearchArgs),
+    /// Show one indexed item: what it is and its passages, pages or time windows.
+    Item {
+        /// The item's id (as `rummage search` prints it).
+        id: i64,
+        /// Rank its segments by this query, best first.
+        #[arg(long, short)]
+        query: Option<String>,
+        /// Print JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Show what is indexed and what is left.
     Status {
         /// Print JSON.
@@ -107,6 +118,27 @@ pub enum FoldersCmd {
         /// Only index files matching this glob; repeatable.
         #[arg(long, value_name = "GLOB")]
         include: Vec<String>,
+    },
+    /// Change a folder: turn it off or on, or replace its globs.
+    #[command(group(clap::ArgGroup::new("change").required(true).multiple(true)
+        .args(["off", "on", "exclude", "include"])))]
+    Set {
+        /// The folder's path or id.
+        path: String,
+        /// Stop indexing and watching it.
+        #[arg(long, conflicts_with = "on")]
+        off: bool,
+        /// Index and watch it again.
+        #[arg(long)]
+        on: bool,
+        /// Skip files matching this glob, replacing the folder's list; repeatable.
+        /// `--exclude ''` clears the list.
+        #[arg(long, value_name = "GLOB")]
+        exclude: Option<Vec<String>>,
+        /// Only index files matching this glob, replacing the folder's list; repeatable.
+        /// `--include ''` clears the list.
+        #[arg(long, value_name = "GLOB")]
+        include: Option<Vec<String>>,
     },
     /// Stop indexing a folder and drop it from the index (the files stay).
     Rm {
@@ -228,6 +260,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
             problems,
         } => reindex(connect(cf)?, folder, item, problems)?,
         Cmd::Search(args) => search(connect(cf)?, args)?,
+        Cmd::Item { id, query, json } => item(connect(cf)?, id, query.as_deref(), json)?,
         Cmd::Status { json, errors } => status(connect(cf)?, json, errors)?,
         Cmd::Config(cmd) => config(cf, cmd, server, cli.local)?,
         Cmd::Doctor => return doctor(cf, server),
@@ -273,6 +306,38 @@ fn folders(api: Api, cmd: FoldersCmd) -> Result<()> {
                 enabled: true,
             })?;
             println!("added {} (id {})", f.path, f.id);
+        }
+        FoldersCmd::Set {
+            path,
+            off,
+            on,
+            exclude,
+            include,
+        } => {
+            let globs = |v: Option<Vec<String>>| {
+                v.map(|v| v.into_iter().filter(|g| !g.trim().is_empty()).collect())
+            };
+            let patch = FolderPatch {
+                include: globs(include),
+                exclude: globs(exclude),
+                enabled: (off || on).then_some(on),
+            };
+            let f = api.update_folder(&folder_ref(&path)?, &patch)?;
+            println!(
+                "{} {}{}{}",
+                f.path,
+                if f.enabled { "on" } else { "off" },
+                if f.exclude.is_empty() {
+                    String::new()
+                } else {
+                    format!(", exclude {}", f.exclude.join(", "))
+                },
+                if f.include.is_empty() {
+                    String::new()
+                } else {
+                    format!(", include {}", f.include.join(", "))
+                }
+            );
         }
         FoldersCmd::Rm { path } => {
             let id = if path.contains('/') || path.starts_with('~') || path == "." {
@@ -503,6 +568,57 @@ fn search(api: Api, args: SearchArgs) -> Result<()> {
                 text.split_whitespace().collect::<Vec<_>>().join(" ")
             );
         }
+    }
+    Ok(())
+}
+
+fn item(api: Api, id: i64, query: Option<&str>, json: bool) -> Result<()> {
+    let d = api.item(id, query)?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&d)?);
+        return Ok(());
+    }
+    let it = &d.item;
+    println!("{}", it.path);
+    println!(
+        "id {} · {} · {} · {}",
+        it.id,
+        it.kind,
+        it.mime.as_deref().unwrap_or("?"),
+        human_bytes(it.size)
+    );
+    if it.status != FileStatus::Indexed {
+        println!(
+            "{:?}{}",
+            it.status,
+            it.error
+                .as_deref()
+                .map(|e| format!(": {e}"))
+                .unwrap_or_default()
+        );
+    }
+    for s in &d.segments {
+        let at = match (s.page, s.t_start, s.t_end) {
+            (Some(p), _, _) => format!("page {p}"),
+            (None, Some(a), Some(b)) => format!("{}-{}", clock(a), clock(b)),
+            (None, Some(a), None) => clock(a),
+            _ => format!("{:?}", s.kind).to_lowercase(),
+        };
+        let score = s.score.map(|v| format!("{v:.3}  ")).unwrap_or_default();
+        let text = s
+            .text
+            .as_deref()
+            .map(|t| {
+                let t = t.split_whitespace().collect::<Vec<_>>().join(" ");
+                let cut: String = t.chars().take(100).collect();
+                if cut.len() < t.len() {
+                    format!("  {cut}…")
+                } else {
+                    format!("  {cut}")
+                }
+            })
+            .unwrap_or_default();
+        println!("  {score}{at}{text}");
     }
     Ok(())
 }
