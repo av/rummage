@@ -151,10 +151,42 @@ pub struct Tools {
     pub pdftotext: bool,
 }
 
+/// The ffmpeg and ffprobe programs, from `tools.ffmpeg` or `PATH`.
+static FFMPEG: OnceLock<(PathBuf, PathBuf)> = OnceLock::new();
+
+/// Uses the ffmpeg at `path` (`tools.ffmpeg`), and the ffprobe in the same folder; empty keeps
+/// the `PATH` lookup. Takes effect only before the first use of either program.
+pub fn set_ffmpeg(path: &str) {
+    let _ = FFMPEG.set(ffmpeg_programs(path));
+}
+
+fn ffmpeg_programs(path: &str) -> (PathBuf, PathBuf) {
+    let path = path.trim();
+    if path.is_empty() {
+        return ("ffmpeg".into(), "ffprobe".into());
+    }
+    let ffmpeg = rummage_core::config::expand_home(path);
+    let ffprobe = match ffmpeg.parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => dir.join("ffprobe"),
+        _ => "ffprobe".into(),
+    };
+    (ffmpeg, ffprobe)
+}
+
+/// A command running ffmpeg.
+pub fn ffmpeg() -> Command {
+    Command::new(&FFMPEG.get_or_init(|| ffmpeg_programs("")).0)
+}
+
+/// A command running ffprobe.
+pub fn ffprobe() -> Command {
+    Command::new(&FFMPEG.get_or_init(|| ffmpeg_programs("")).1)
+}
+
 impl Tools {
     pub fn detect() -> Tools {
         Tools {
-            ffmpeg: runs("ffmpeg", "-version") && runs("ffprobe", "-version"),
+            ffmpeg: works(ffmpeg().arg("-version")) && works(ffprobe().arg("-version")),
             pdftoppm: runs("pdftoppm", "-v"),
             pdftotext: runs("pdftotext", "-v"),
         }
@@ -194,9 +226,11 @@ impl Tools {
 }
 
 fn runs(program: &str, arg: &str) -> bool {
-    Command::new(program)
-        .arg(arg)
-        .stdout(Stdio::null())
+    works(Command::new(program).arg(arg))
+}
+
+fn works(cmd: &mut Command) -> bool {
+    cmd.stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
         .is_ok()
@@ -268,5 +302,16 @@ mod tests {
         assert_eq!(k("/a/project.flp"), None);
         assert_eq!(k("/a/.bashrc"), None);
         assert_eq!(k("/a/noext"), None);
+    }
+
+    #[test]
+    fn ffmpeg_from_config() {
+        let p = |s: &str| ffmpeg_programs(s);
+        assert_eq!(p(""), ("ffmpeg".into(), "ffprobe".into()));
+        assert_eq!(
+            p("/opt/ff/bin/ffmpeg"),
+            ("/opt/ff/bin/ffmpeg".into(), "/opt/ff/bin/ffprobe".into())
+        );
+        assert_eq!(p("ffmpeg7"), ("ffmpeg7".into(), "ffprobe".into()));
     }
 }

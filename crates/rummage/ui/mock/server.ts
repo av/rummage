@@ -341,6 +341,7 @@ function settings(): S['SettingsView'] {
       engine: { backend: 'auto', device: 'auto', threads: 0 },
       index: { concurrency: 0, scan_interval_secs: 3600, thumbnail_size: 320, skip: ['node_modules', '.git'] },
       ui: { files_url: filesUrl },
+      tools: { ffmpeg: '' },
     },
     config_path: `${HOME}/.config/rummage/config.toml`,
     env_overrides: [],

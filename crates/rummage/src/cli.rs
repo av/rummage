@@ -211,6 +211,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
         return Ok(ExitCode::SUCCESS);
     }
     let cf = ConfigFile::load(&config_path)?;
+    crate::extract::set_ffmpeg(&cf.config().tools.ffmpeg);
     let connect = |cf: ConfigFile| Api::connect(cf, server, cli.local);
     match cli.cmd {
         Cmd::Serve { bind, base_path } => serve(cf, bind, base_path)?,
@@ -873,10 +874,7 @@ fn doctor(cf: ConfigFile, server: Option<&str>) -> Result<ExitCode> {
             "pdftoppm (poppler-utils) not found; PDFs are indexed by text only".into()
         },
     );
-    match std::process::Command::new("ffmpeg")
-        .arg("-version")
-        .output()
-    {
+    match crate::extract::ffmpeg().arg("-version").output() {
         Ok(out) if out.status.success() => {
             let first = String::from_utf8_lossy(&out.stdout)
                 .lines()

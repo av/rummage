@@ -126,6 +126,7 @@ defaults below. The same keys are readable and writable with `rummage config get
 | `index.thumbnail_size` | `320` | `RUMMAGE_THUMB_SIZE` | Longest thumbnail edge in pixels |
 | `index.skip` | `node_modules, .git, target, dist, build, .cache, __pycache__, .venv` | `RUMMAGE_SKIP` (comma list) | Directory names skipped everywhere |
 | `ui.files_url` | `""` | `RUMMAGE_FILES_URL` | Link for "Open in Files" in the web UI, e.g. `/files/files{path}`; `{path}` is the file's absolute path, `{dir}` its folder. Empty hides it |
+| `tools.ffmpeg` | `""` | `RUMMAGE_FFMPEG` | The ffmpeg program for video and HEIC/AVIF photos; ffprobe is taken from the same folder. Empty means `ffmpeg` and `ffprobe` on `PATH` |
 
 Each `[[folders]]` entry has `path`, `include` and `exclude` (globs relative to the folder;
 an empty `include` means everything) and `enabled`:
@@ -142,7 +143,7 @@ enabled = true
 ```
 
 Environment overrides change only the running program; they are never written to the file.
-Keys under `data_dir`, `server`, `model`, `engine` and `index.concurrency` need a restart of
+Keys under `data_dir`, `server`, `model`, `engine`, `tools` and `index.concurrency` need a restart of
 `rummage serve`; folders and the other `index` keys apply live.
 
 ## CLI reference
@@ -230,7 +231,8 @@ videos are listed as skipped with the reason; without poppler, PDFs are indexed 
 through a built-in reader, without page images. poppler was picked over pdfium because it is a
 standard package next to ffmpeg, while pdfium would mean shipping or downloading a shared
 library beside the binary. A video codec that the installed ffmpeg can't decode (Fedora's
-`ffmpeg-free` has no HEVC) is skipped with that reason too.
+`ffmpeg-free` has no HEVC) is skipped with that reason too; point `tools.ffmpeg` at a full build
+(e.g. a static one from [BtbN/FFmpeg-Builds](https://github.com/BtbN/FFmpeg-Builds)) to index them.
 
 Search embeds the query (`task: search result | query: …`), scores every stored vector exactly
 (all vectors are held in memory, at `model.dim` length, and updated as files are indexed), runs

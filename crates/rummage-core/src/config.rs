@@ -25,6 +25,7 @@ pub struct Config {
     pub engine: EngineConfig,
     pub index: IndexConfig,
     pub ui: UiConfig,
+    pub tools: ToolsConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
@@ -142,6 +143,14 @@ pub struct UiConfig {
     pub files_url: String,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, ToSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct ToolsConfig {
+    /// The ffmpeg program, for video and HEIC/AVIF photos; ffprobe is taken from the same
+    /// folder. `~` is expanded. Empty means `ffmpeg` and `ffprobe` on `PATH`.
+    pub ffmpeg: String,
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -152,6 +161,7 @@ impl Default for Config {
             engine: EngineConfig::default(),
             index: IndexConfig::default(),
             ui: UiConfig::default(),
+            tools: ToolsConfig::default(),
         }
     }
 }
@@ -234,10 +244,18 @@ pub const ENV_OVERRIDES: &[(&str, &str)] = &[
     ("RUMMAGE_THUMB_SIZE", "index.thumbnail_size"),
     ("RUMMAGE_SKIP", "index.skip"),
     ("RUMMAGE_FILES_URL", "ui.files_url"),
+    ("RUMMAGE_FFMPEG", "tools.ffmpeg"),
 ];
 
 /// Keys that only take effect after a restart of `rummage serve`.
-const RESTART_PREFIXES: &[&str] = &["data_dir", "server", "model", "engine", "index.concurrency"];
+const RESTART_PREFIXES: &[&str] = &[
+    "data_dir",
+    "server",
+    "model",
+    "engine",
+    "index.concurrency",
+    "tools",
+];
 
 pub fn needs_restart(key: &str) -> bool {
     RESTART_PREFIXES

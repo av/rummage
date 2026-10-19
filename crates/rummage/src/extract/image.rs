@@ -2,7 +2,6 @@
 
 use std::io::{BufReader, Cursor};
 use std::path::Path;
-use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 use image::{DynamicImage, ImageDecoder, ImageReader};
@@ -83,10 +82,10 @@ fn upright<R: std::io::BufRead + std::io::Seek>(reader: ImageReader<R>) -> Resul
 }
 
 fn via_ffmpeg(path: &Path) -> Result<DynamicImage> {
-    let png = run(Command::new("ffmpeg")
-        .args(["-v", "error", "-i"])
-        .arg(path)
-        .args(["-frames:v", "1", "-f", "image2pipe", "-c:v", "png", "-"]))?;
+    let mut cmd = super::ffmpeg();
+    cmd.args(["-v", "error", "-i"]).arg(path);
+    cmd.args(["-frames:v", "1", "-f", "image2pipe", "-c:v", "png", "-"]);
+    let png = run(&mut cmd)?;
     image::load_from_memory(&png).context("decoding ffmpeg output")
 }
 

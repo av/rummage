@@ -424,6 +424,12 @@ export interface components {
             server: components["schemas"]["ServerConfig"];
             /**
              * @default {
+             *       "ffmpeg": ""
+             *     }
+             */
+            tools: components["schemas"]["ToolsConfig"];
+            /**
+             * @default {
              *       "files_url": ""
              *     }
              */
@@ -971,6 +977,14 @@ export interface components {
             /** @description True when this piece matches a word of the query. */
             hit?: boolean;
             text: string;
+        };
+        ToolsConfig: {
+            /**
+             * @description The ffmpeg program, for video and HEIC/AVIF photos; ffprobe is taken from the same
+             *     folder. `~` is expanded. Empty means `ffmpeg` and `ffprobe` on `PATH`.
+             * @default
+             */
+            ffmpeg: string;
         };
         UiConfig: {
             /**

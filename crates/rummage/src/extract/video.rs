@@ -3,7 +3,7 @@
 
 use std::io::Read;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 use anyhow::{Context, Result, bail};
 use image::DynamicImage;
@@ -39,7 +39,7 @@ pub fn extract(path: &Path, ctx: &Ctx, sink: &mut Sink) -> Result<Outcome> {
         ..Default::default()
     };
 
-    let mut child = Command::new("ffmpeg")
+    let mut child = super::ffmpeg()
         .args(["-v", "error", "-nostdin", "-i"])
         .arg(path)
         .args(["-map", "0:v:0", "-t", &MAX_SECS.to_string()])
@@ -140,7 +140,7 @@ pub fn extract(path: &Path, ctx: &Ctx, sink: &mut Sink) -> Result<Outcome> {
     }
     if sent == 0 {
         // Clips shorter than a second give no frame at 1 fps: take the first one.
-        let png = run(Command::new("ffmpeg")
+        let png = run(super::ffmpeg()
             .args(["-v", "error", "-nostdin", "-i"])
             .arg(path)
             .args(["-map", "0:v:0", "-frames:v", "1", "-vf"])
@@ -156,7 +156,7 @@ pub fn extract(path: &Path, ctx: &Ctx, sink: &mut Sink) -> Result<Outcome> {
     }
 
     if probe.has_audio {
-        let pcm = run(Command::new("ffmpeg")
+        let pcm = run(super::ffmpeg()
             .args(["-v", "error", "-nostdin", "-i"])
             .arg(path)
             .args(["-map", "0:a:0", "-t", &MAX_SECS.to_string()])
@@ -218,7 +218,7 @@ struct Probe {
 }
 
 fn probe(path: &Path) -> Result<Probe> {
-    let out = run(Command::new("ffprobe")
+    let out = run(super::ffprobe()
         .args([
             "-v",
             "error",
@@ -324,7 +324,7 @@ impl<'a, R: Read> PngStream<'a, R> {
 
 /// One frame at `t` seconds, for the preview endpoint (WebP).
 pub fn render_frame(path: &Path, t: f64) -> Result<Vec<u8>> {
-    let png = run(Command::new("ffmpeg")
+    let png = run(super::ffmpeg()
         .args([
             "-v",
             "error",
