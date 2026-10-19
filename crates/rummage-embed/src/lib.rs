@@ -167,6 +167,42 @@ pub fn devices() -> Vec<Device> {
     out
 }
 
+/// The GPU backend compiled into this build, if any.
+pub fn gpu_backend() -> Option<&'static str> {
+    if cfg!(feature = "cuda") {
+        Some("cuda")
+    } else if cfg!(feature = "rocm") {
+        Some("rocm")
+    } else if cfg!(feature = "vulkan") {
+        Some("vulkan")
+    } else {
+        None
+    }
+}
+
+/// A warning when this is a GPU build but llama.cpp found no GPU, so everything runs on the CPU.
+pub fn cpu_fallback_warning(devices: &[Device]) -> Option<String> {
+    let backend = gpu_backend()?;
+    if devices.iter().any(|d| d.gpu) {
+        return None;
+    }
+    let (name, hint) = match backend {
+        "cuda" => ("CUDA", "the NVIDIA driver (in Docker: `--gpus all`)"),
+        "rocm" => (
+            "ROCm",
+            "the ROCm runtime and access to /dev/kfd and /dev/dri",
+        ),
+        _ => (
+            "Vulkan",
+            "a Vulkan driver (Mesa, or the GPU vendor's) and access to /dev/dri",
+        ),
+    };
+    Some(format!(
+        "this is a {name} build but no {name} GPU was found, so the model runs on the CPU \
+         (several times slower); {name} needs {hint}"
+    ))
+}
+
 /// Physical CPU cores (hyper-threads share their core's vector units, so llama.cpp gains
 /// nothing from them).
 pub fn physical_cores() -> usize {
@@ -421,6 +457,12 @@ impl Engine {
             };
         }
 
+        let devices = devices();
+        if cfg.gpu_layers != 0
+            && let Some(warning) = cpu_fallback_warning(&devices)
+        {
+            eprintln!("rummage-embed: warning: {warning}");
+        }
         let info = EngineInfo {
             backends: env!("RUMMAGE_EMBED_BACKENDS").to_string(),
             llama_cpp_commit: env!("RUMMAGE_LLAMA_CPP_COMMIT").to_string(),
@@ -428,7 +470,7 @@ impl Engine {
             model_path,
             mmproj_path,
             precision: format!("{:?}", cfg.precision),
-            devices: devices(),
+            devices,
             dim: cfg.dim,
         };
         Ok(Self {

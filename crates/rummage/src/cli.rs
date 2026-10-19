@@ -824,6 +824,31 @@ fn doctor(cf: ConfigFile, server: Option<&str>) -> Result<ExitCode> {
         );
     }
 
+    let devices = rummage_embed::devices();
+    for d in &devices {
+        check(
+            true,
+            false,
+            format!(
+                "device {}: {}{}",
+                d.name,
+                d.description,
+                if d.gpu {
+                    format!(
+                        " ({} of {} free)",
+                        human_bytes(d.memory_free as u64),
+                        human_bytes(d.memory_total as u64)
+                    )
+                } else {
+                    String::new()
+                }
+            ),
+        );
+    }
+    if let Some(warning) = rummage_embed::cpu_fallback_warning(&devices) {
+        check(false, true, warning);
+    }
+
     let gpus = gpus();
     check(
         !gpus.is_empty(),

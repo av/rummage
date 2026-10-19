@@ -4,16 +4,18 @@
 //! Environment knobs (all optional):
 //! - `RUMMAGE_LLAMA_CPP_DIR`: use another llama.cpp checkout instead of the `llama.cpp` submodule.
 //! - `RUMMAGE_GGML_NATIVE`: `1` (default) tunes the CPU code for this machine, `0` for portable builds.
-//! - `RUMMAGE_HIP_TARGETS`: AMD GPU targets, default `gfx1151;gfx1100;gfx1101;gfx1102;gfx1030;gfx90a;gfx942`.
-//! - `RUMMAGE_CUDA_ARCHS`: CUDA architectures, default `75;80;86;89;90;120`.
+//! - `RUMMAGE_HIP_TARGETS`: AMD GPU targets, default
+//!   `gfx1151;gfx1150;gfx1100;gfx1101;gfx1102;gfx1200;gfx1201;gfx1030;gfx90a;gfx942`.
+//! - `RUMMAGE_CUDA_ARCHS`: CUDA architectures, default `75;80;86;89;90;100;120` (Turing to Blackwell).
 //! - `RUMMAGE_CMAKE_ARGS`: extra `-D` arguments, separated by spaces.
 
 use std::env;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const DEFAULT_HIP_TARGETS: &str = "gfx1151;gfx1100;gfx1101;gfx1102;gfx1030;gfx90a;gfx942";
-const DEFAULT_CUDA_ARCHS: &str = "75;80;86;89;90;120";
+const DEFAULT_HIP_TARGETS: &str =
+    "gfx1151;gfx1150;gfx1100;gfx1101;gfx1102;gfx1200;gfx1201;gfx1030;gfx90a;gfx942";
+const DEFAULT_CUDA_ARCHS: &str = "75;80;86;89;90;100;120";
 
 fn main() {
     let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
@@ -57,6 +59,8 @@ fn main() {
     let mut cfg = cmake::Config::new(&src);
     cfg.profile("Release")
         .define("BUILD_SHARED_LIBS", "OFF")
+        // Rust links a position-independent executable; ROCm's clang does not default to PIC.
+        .define("CMAKE_POSITION_INDEPENDENT_CODE", "ON")
         .define("LLAMA_BUILD_COMMON", "OFF")
         .define("LLAMA_BUILD_TESTS", "OFF")
         .define("LLAMA_BUILD_TOOLS", "OFF")
@@ -101,6 +105,10 @@ fn main() {
         cfg.define("CMAKE_CUDA_ARCHITECTURES", archs);
         // NCCL (multi-GPU collectives) would be one more runtime library; one GPU is enough here.
         cfg.define("GGML_CUDA_NCCL", "OFF");
+        // Without VMM ggml never calls the driver API directly, so the binary does not link
+        // libcuda.so.1: the static CUDA runtime loads it at run time, and a machine without the
+        // NVIDIA driver gets zero CUDA devices (and the CPU) instead of a loader error.
+        cfg.define("GGML_CUDA_NO_VMM", "ON");
     }
     if let Ok(extra) = env::var("RUMMAGE_CMAKE_ARGS") {
         for arg in extra.split_whitespace() {
@@ -164,7 +172,8 @@ fn main() {
                 println!("cargo:rustc-link-search=native={}", p.display());
             }
         }
-        for lib in ["cudart", "cublas", "cublasLt", "cuda"] {
+        println!("cargo:rustc-link-lib=static=cudart_static");
+        for lib in ["cublas", "cublasLt", "dl", "rt", "pthread"] {
             println!("cargo:rustc-link-lib=dylib={lib}");
         }
     }

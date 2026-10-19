@@ -55,6 +55,48 @@ video and audio from the matching moment, PDFs at the matching page, text at the
 
 More in [docs/screenshots](docs/screenshots).
 
+## Install
+
+Each [release](https://github.com/av/rummage/releases) has one Linux x86_64 build per backend,
+`rummage-<version>-linux-x86_64-<backend>.tar.gz` (the binary, this README and the licences), with
+SHA-256 sums. Pick the one for your GPU; every GPU build also runs on the CPU, with a warning,
+when it finds no GPU.
+
+| Backend | For | Needs on the system |
+|---|---|---|
+| `vulkan` | any recent GPU: AMD, NVIDIA, Intel. The fastest build on AMD's Radeon 8060S | the Vulkan loader (`libvulkan.so.1`) and a Vulkan driver (Mesa RADV/ANV, or NVIDIA's) |
+| `rocm` | AMD GPUs: gfx1151/1150 (Strix Halo/Point), gfx1100-1102 (RX 7000), gfx1200/1201 (RX 9000), gfx1030 (RX 6000), gfx90a/gfx942 (MI200/MI300) | ROCm 7.x: `libamdhip64.so.7`, hipBLAS, rocBLAS |
+| `cuda` | NVIDIA GPUs from Turing to Blackwell (sm 75, 80, 86, 89, 90, 100, 120) | the NVIDIA driver (525 or newer) and cuBLAS 12 (`libcublas.so.12`, `libcublasLt.so.12`, from CUDA 12.x) |
+| `cpu` | no GPU | nothing extra |
+
+All builds need glibc 2.39 or newer (Ubuntu 24.04, Fedora 40, Debian 13) and an x86-64-v3 CPU
+(AVX2, FMA: Intel Haswell or AMD Zen and later). llama.cpp is linked in statically, and so is
+the CUDA runtime; the vendor libraries above stay dynamic. `ffmpeg` on `PATH` adds video, and
+`rummage doctor` shows what the binary found: backend, GPUs, model files, ffmpeg, config path.
+
+### Docker
+
+Images are `ghcr.io/av/rummage:<version>-<backend>` and `ghcr.io/av/rummage:latest-<backend>`.
+They include ffmpeg, run as user 1000, keep everything (config, index, models) in the `/data`
+volume, listen on port 8099 and have a healthcheck on `/api/v1/health`.
+
+```sh
+# Vulkan or ROCm on AMD/Intel: pass the GPU device nodes and the host groups that own them.
+docker run -d --name rummage -p 8099:8099 -v rummage-data:/data -v ~/Pictures:/media/Pictures:ro \
+  --device /dev/dri --group-add $(getent group render | cut -d: -f3) --group-add $(getent group video | cut -d: -f3) \
+  ghcr.io/av/rummage:latest-vulkan
+# ROCm: the same plus --device /dev/kfd, with the :latest-rocm image.
+# CUDA (with the NVIDIA container toolkit):
+docker run -d --name rummage -p 8099:8099 -v rummage-data:/data --gpus all ghcr.io/av/rummage:latest-cuda
+
+docker exec rummage rummage folders add /media/Pictures
+docker exec rummage rummage doctor
+```
+
+`docker/Dockerfile` builds any of them from source:
+`docker build -f docker/Dockerfile --build-arg BACKEND=rocm -t rummage:rocm .`
+(after `git submodule update --init --depth 1`).
+
 ## Config reference
 
 The config file is `~/.config/rummage/config.toml` (`$XDG_CONFIG_HOME` is honoured;
@@ -228,6 +270,17 @@ RUMMAGE_BIN=../../../target/debug/rummage bunx playwright test   # plus the real
 bun run screenshots                # refresh docs/screenshots
 SPEC=openapi.json bun run gen:api  # refresh src/lib/api-types.ts from /api/openapi.json
 ```
+
+CI (`.github/workflows/ci.yml`) runs on a self-hosted GitHub Actions runner on fedora (one job
+at a time; each job waits while the machine's load is above 70% of its threads). It runs those
+checks and the web UI's checks and Playwright tests, then builds, tests and packs all four
+backends (`build.yml`), each in its toolchain stage of `docker/Dockerfile` on Ubuntu 24.04:
+NVIDIA's CUDA 12.9 devel image, AMD's ROCm 7.2 dev image, and plain Ubuntu for CPU and Vulkan.
+The Vulkan and ROCm tests, parity test included, run on fedora's Radeon GPU; the CUDA build has
+no GPU there and runs them on its CPU fallback. Cargo target dirs, ccache and the bun cache stay
+under `/mnt/models/rummage/ci` between runs. `docker/in-toolchain.sh <image> <command>` runs the
+same builds by hand. Pushing a `v*` tag runs `release.yml`: the four tarballs and `SHA256SUMS`
+go to a GitHub pre-release, and the images to ghcr.io.
 
 Crates: `crates/rummage` (the binary: CLI, server, embedded UI), `crates/rummage-core`
 (config, SQLite store and schema, search, API types, the `Embedder` trait and a fake embedder

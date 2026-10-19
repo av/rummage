@@ -125,7 +125,7 @@ so each build is one binary. Requirements for every backend: a C++17 compiler, C
 | `cpu` (default) | CPU | none | none |
 | `vulkan` | Vulkan (NVIDIA, AMD, Intel) | Vulkan headers + loader dev files, `glslc` | `libvulkan.so.1` + a Vulkan driver |
 | `rocm` | AMD HIP | ROCm: `hipcc`/HIP clang, `hipblas-devel`, `rocblas-devel` | ROCm runtime, hipBLAS, rocBLAS |
-| `cuda` | NVIDIA CUDA | CUDA toolkit (`nvcc`, cuBLAS) | NVIDIA driver, CUDA runtime, cuBLAS |
+| `cuda` | NVIDIA CUDA | CUDA toolkit (`nvcc`, cuBLAS) | NVIDIA driver, cuBLAS (the CUDA runtime is linked statically) |
 
 ```bash
 cargo build -p rummage-embed --release                      # cpu
@@ -139,8 +139,8 @@ Build knobs (environment variables read by `build.rs`):
 | Variable | Default | Meaning |
 |---|---|---|
 | `RUMMAGE_GGML_NATIVE` | `1` | `1` tunes CPU code for the build machine; `0` for portable release builds |
-| `RUMMAGE_HIP_TARGETS` | `gfx1151;gfx1100;gfx1101;gfx1102;gfx1030;gfx90a;gfx942` | AMD GPU targets |
-| `RUMMAGE_CUDA_ARCHS` | `75;80;86;89;90;120` | CUDA architectures |
+| `RUMMAGE_HIP_TARGETS` | `gfx1151;gfx1150;gfx1100;gfx1101;gfx1102;gfx1200;gfx1201;gfx1030;gfx90a;gfx942` | AMD GPU targets |
+| `RUMMAGE_CUDA_ARCHS` | `75;80;86;89;90;100;120` | CUDA architectures (Turing to Blackwell) |
 | `RUMMAGE_LLAMA_CPP_DIR` | the submodule | use another llama.cpp checkout |
 | `RUMMAGE_CMAKE_ARGS` | | extra `-DKEY=VALUE` CMake arguments |
 
@@ -171,13 +171,22 @@ Measured on fedora (32 threads): CPU build of llama.cpp about 20 s, Vulkan about
 generation), ROCm about 5 min for all seven GPU targets (1 min for gfx1151 alone), CUDA about
 8 min for all six architectures.
 
-Two workarounds for the pinned llama.cpp, both in `build.rs`:
+Workarounds for the pinned llama.cpp and the toolchains, in `build.rs`:
 
 - ROCm 6.x: llama.cpp's `topk-moe.cu` (since ggml-org/llama.cpp#29181) calls `__ballot_sync`,
   which ggml's own HIP header hides, so the HIP build fails. `src/hip_compat.h` is force-included
   and maps it to `__ballot`, which is the same thing with a full mask.
 - CUDA: ggml turns on NCCL (multi-GPU collectives) whenever it finds it, which adds a runtime
   library and broke the link in the NVIDIA image. It is switched off; one GPU is enough.
+- CUDA: the binary does not link the driver library (`libcuda.so.1`). ggml is built with
+  `GGML_CUDA_NO_VMM` (VMM is the only part that calls the driver API directly) and the CUDA
+  runtime is linked statically, which loads the driver when it starts. So a CUDA build starts on
+  a machine without the NVIDIA driver and runs on the CPU, as the Vulkan and ROCm builds do
+  without a GPU.
+
+The static libraries are built position-independent, since Rust links a PIE binary and ROCm's
+clang on Ubuntu does not default to PIC. The force-included `hip_compat.h` only applies to
+ROCm 6; ROCm 7 declares `__ballot_sync` itself.
 
 Running GPU builds needs the device in the container or on the host: `/dev/dri` for Vulkan,
 `/dev/kfd` + `/dev/dri` for ROCm, the NVIDIA container toolkit for CUDA.

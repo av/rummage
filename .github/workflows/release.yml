@@ -1,0 +1,57 @@
+# On a version tag: all four backends, images pushed to ghcr.io (private, like the repo), and a
+# GitHub pre-release with the tarballs and their SHA-256 sums. Runs on the fedora runner; the
+# build jobs leave their files in /mnt/models/rummage/ci/dist/<run id> for the release job.
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  backends:
+    uses: ./.github/workflows/build.yml
+    with:
+      version: ${{ github.ref_name }}
+      push-images: true
+
+  release:
+    needs: backends
+    runs-on: [self-hosted, fedora]
+    steps:
+      - name: Release notes
+        run: |
+          cd /mnt/models/rummage/ci/dist/$GITHUB_RUN_ID
+          sha256sum rummage-*.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+          {
+            echo "Pre-release of rummage ${GITHUB_REF_NAME} for Linux x86_64."
+            echo
+            echo "| Backend | File | Runtime needs |"
+            echo "|---|---|---|"
+            v=${GITHUB_REF_NAME#v}
+            echo "| CPU | rummage-$v-linux-x86_64-cpu.tar.gz | glibc 2.39+ (Ubuntu 24.04, Fedora 40+), an x86-64-v3 CPU (AVX2) |"
+            echo "| Vulkan | rummage-$v-linux-x86_64-vulkan.tar.gz | the Vulkan loader (libvulkan.so.1) and a Vulkan driver: NVIDIA, AMD or Intel |"
+            echo "| ROCm | rummage-$v-linux-x86_64-rocm.tar.gz | ROCm 7.x: HIP runtime, hipBLAS, rocBLAS |"
+            echo "| CUDA | rummage-$v-linux-x86_64-cuda.tar.gz | NVIDIA driver 525+, cuBLAS 12 (libcublas.so.12, libcublasLt.so.12) |"
+            echo
+            echo "Images (private, ghcr.io), \`docker pull <tag>\`:"
+            echo
+            echo '```'
+            cat image-*.txt
+            echo '```'
+            echo
+            echo "Each image is also tagged \`latest-<backend>\`. See the README for how to run them."
+          } > notes.md
+          ls -l
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd /mnt/models/rummage/ci/dist/$GITHUB_RUN_ID
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --prerelease \
+            --title "rummage $GITHUB_REF_NAME" --notes-file notes.md \
+            rummage-*.tar.gz rummage-*.tar.gz.sha256 SHA256SUMS

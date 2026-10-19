@@ -1,0 +1,131 @@
+# Builds, tests and packages rummage for every backend; called by ci.yml and release.yml.
+# Runs on the self-hosted runner on fedora (AMD Ryzen AI Max+ 395, Radeon 8060S). Each backend
+# compiles in its toolchain stage of docker/Dockerfile (Ubuntu 24.04, NVIDIA's CUDA devel image,
+# AMD's ROCm dev image) with a cargo target dir and ccache that persist on fedora, runs the whole
+# test suite there (Vulkan and ROCm on fedora's GPU; CUDA has no GPU here and runs on its CPU
+# fallback), packs the tarball and builds the image from the same binary.
+name: build
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: Version for file names and image tags (a leading v is dropped)
+        type: string
+        default: dev
+      push-images:
+        description: Push the images to ghcr.io
+        type: boolean
+        default: false
+
+env:
+  CARGO_TERM_COLOR: always
+  IMAGE: ghcr.io/${{ github.repository }}
+  CI_ROOT: /mnt/models/rummage/ci
+
+jobs:
+  build:
+    name: ${{ matrix.backend }}
+    runs-on: [self-hosted, fedora]
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        backend: [cpu, vulkan, rocm, cuda]
+    env:
+      BACKEND: ${{ matrix.backend }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: true
+
+      - name: Settings
+        run: |
+          v='${{ inputs.version }}'
+          {
+            echo "VERSION=${v#v}"
+            echo "CACHE_DIR=$CI_ROOT/cache"
+            echo "TARGET_DIR=$CI_ROOT/target/$BACKEND"
+            echo "MODEL_DIR=/mnt/models/rummage/gguf"
+            echo "DIST=$CI_ROOT/dist/$GITHUB_RUN_ID"
+            # Vulkan and ROCm tests run on fedora's GPU.
+            if [[ $BACKEND == vulkan || $BACKEND == rocm ]]; then echo "GPU=1"; fi
+          } >> "$GITHUB_ENV"
+
+      - name: Toolchain image
+        run: |
+          docker build -q -f docker/Dockerfile --build-arg BACKEND=$BACKEND \
+            --target toolchain -t rummage-toolchain:$BACKEND .
+
+      - name: Wait for a quiet machine
+        run: docker/wait-load.sh
+
+      - name: Build
+        run: |
+          docker/in-toolchain.sh rummage-toolchain:$BACKEND bash -c '
+            ccache -z
+            cargo build --release --locked -p rummage --features $0
+            ccache -s' $BACKEND
+          ls -l $TARGET_DIR/release/rummage
+
+      - name: Test (Vulkan and ROCm on the GPU, CUDA on the CPU fallback)
+        run: |
+          docker/in-toolchain.sh rummage-toolchain:$BACKEND \
+            cargo test --release --locked --workspace --features rummage/$BACKEND
+
+      - name: Doctor and linked libraries
+        run: |
+          docker/in-toolchain.sh rummage-toolchain:$BACKEND bash -c '
+            ldd /target/release/rummage
+            /target/release/rummage --version
+            /target/release/rummage doctor'
+
+      - name: Package
+        run: |
+          docker/package.sh "$VERSION" "$BACKEND" $TARGET_DIR/release/rummage "$DIST"
+          # Keep a few days of packages on fedora.
+          find $CI_ROOT/dist -mindepth 1 -maxdepth 1 -type d -mtime +3 -exec rm -rf {} +
+
+      - name: Image
+        run: |
+          bin=$(mktemp -d) && cp $TARGET_DIR/release/rummage $bin/
+          docker build -q -f docker/Dockerfile --build-arg BACKEND=$BACKEND \
+            --build-context dist=$bin -t rummage-ci:$BACKEND .
+          rm -rf $bin
+          docker image ls rummage-ci:$BACKEND
+
+      - name: Image smoke test (doctor, then serve until healthy)
+        run: |
+          gpu=()
+          if [[ ${GPU:-} == 1 ]]; then
+            gpu=(--device /dev/dri --group-add $(getent group video | cut -d: -f3) --group-add $(getent group render | cut -d: -f3))
+            if [[ $BACKEND == rocm ]]; then gpu+=(--device /dev/kfd); fi
+          fi
+          docker run --rm "${gpu[@]}" rummage-ci:$BACKEND doctor
+          name=rummage-ci-smoke-$BACKEND-$GITHUB_RUN_ID
+          docker run -d --name $name rummage-ci:$BACKEND
+          trap "docker rm -f $name >/dev/null" EXIT
+          for i in $(seq 60); do
+            status=$(docker inspect -f '{{.State.Health.Status}}' $name)
+            [[ $status == healthy ]] && break
+            sleep 2
+          done
+          docker logs $name
+          docker inspect -f '{{.State.Health.Status}} user={{.Config.User}}' $name
+          [[ $status == healthy ]]
+          docker exec $name curl -fsS http://127.0.0.1:8099/api/v1/health
+          docker exec $name id
+
+      - name: Push image
+        if: inputs.push-images
+        run: |
+          # A throwaway docker config, so fedora's own registry logins stay untouched.
+          export DOCKER_CONFIG=$(mktemp -d)
+          trap 'rm -rf "$DOCKER_CONFIG"' EXIT
+          echo '${{ github.token }}' | docker login ghcr.io -u '${{ github.actor }}' --password-stdin
+          for tag in "$VERSION-$BACKEND" "latest-$BACKEND"; do
+            docker tag rummage-ci:$BACKEND $IMAGE:$tag
+            docker push -q $IMAGE:$tag
+          done
+          digest=$(docker inspect -f '{{index .RepoDigests 0}}' $IMAGE:$VERSION-$BACKEND)
+          echo "$IMAGE:$VERSION-$BACKEND $digest" | tee "$DIST/image-$BACKEND.txt"
