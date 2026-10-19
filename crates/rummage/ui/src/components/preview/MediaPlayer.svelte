@@ -22,6 +22,8 @@
   let muted = $state(false);
   let wave = $state<Wave | null>(null);
   let failed = $state(false);
+  /** The browser plays the sound but can't decode the picture (e.g. HEVC in Chrome on Linux). */
+  let noPicture = $state(false);
   let dragging = false;
 
   $effect(() => {
@@ -101,6 +103,7 @@
       bind:paused
       bind:muted
       onloadedmetadata={onloaded}
+      onloadeddata={(e) => (noPicture = e.currentTarget.videoWidth === 0)}
       onerror={() => (failed = true)}
       onclick={toggle}
     ></video>
@@ -118,6 +121,8 @@
   {/if}
   {#if failed}
     <p class="failed">This file can't be played here. It may be gone, or in a format the browser can't play. Try "Open".</p>
+  {:else if noPicture}
+    <p class="failed">This browser can't show this video's picture (phone videos are often HEVC), so only its sound plays. "Download" it to watch it in a video player.</p>
   {/if}
 
   <div class="controls">
