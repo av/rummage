@@ -5,9 +5,8 @@ watches the folders you choose, and indexes text, images, documents, audio and v
 Google DeepMind's [EmbeddingGemma 2](https://huggingface.co/google/embeddinggemma-2), running
 on llama.cpp with CUDA, ROCm, Vulkan or CPU.
 
-Work in progress: the program, config, CLI, API and web UI are in place; the embedding engine
-and the indexer are being built. Until the engine lands, every build uses a
-deterministic stand-in embedder, so results are not meaningful yet.
+The program, config, CLI, API, web UI, indexer and embedding engine are in place. The model
+files download into `model.dir` the first time something is embedded.
 
 ## Quickstart
 
@@ -78,7 +77,7 @@ defaults below. The same keys are readable and writable with `rummage config get
 | `index.concurrency` | `0` | `RUMMAGE_CONCURRENCY` | Files extracted in parallel; 0 is automatic |
 | `index.scan_interval_secs` | `3600` | `RUMMAGE_SCAN_INTERVAL` | Full re-scan period (file watching covers the rest); 0 disables |
 | `index.thumbnail_size` | `320` | `RUMMAGE_THUMB_SIZE` | Longest thumbnail edge in pixels |
-| `index.skip` | `node_modules, .git, target, dist, .cache, __pycache__, .venv` | `RUMMAGE_SKIP` (comma list) | Directory names skipped everywhere |
+| `index.skip` | `node_modules, .git, target, dist, build, .cache, __pycache__, .venv` | `RUMMAGE_SKIP` (comma list) | Directory names skipped everywhere |
 | `ui.files_url` | `""` | `RUMMAGE_FILES_URL` | Link for "Open in Files" in the web UI, e.g. `/files/files{path}`; `{path}` is the file's absolute path, `{dir}` its folder. Empty hides it |
 
 Each `[[folders]]` entry has `path`, `include` and `exclude` (globs relative to the folder;
@@ -107,8 +106,14 @@ rummage folders add <path> [--exclude GLOB]... [--include GLOB]...
 rummage folders rm <path|id>                       stop indexing; drops it from the index, not the disk
 rummage folders ls [--json]
 rummage index [--once | --watch]                   index now; --watch keeps following changes
-rummage search <query...> [--type image|video|audio|text|doc] [--limit N] [--json]
-rummage status [--json]
+rummage index --pause | --resume                   pause or resume a running server's indexing
+rummage reindex [--folder PATH|ID | --item ID | --problems]
+                                                   index again (everything by default)
+rummage search <query...> | --similar ID | --file PATH
+               [--type KIND,...] [--folder PATH|ID]... [--path GLOB]
+               [--after YYYY-MM-DD] [--before YYYY-MM-DD] [--mode hybrid|vector|keyword]
+               [--limit N] [--json]
+rummage status [--json] [--errors]                 counts per kind and folder; --errors lists failures
 rummage config get [key] | set <key> <value> | path
 rummage doctor
 ```
@@ -129,11 +134,14 @@ Everything the UI does goes through `/api/v1`. The OpenAPI description is at
 | `GET /api/v1/fs/dirs` | Sub-directories of a server directory (`?path=`, `?hidden=true`), for picking folders |
 | `GET /api/v1/index/status` | Totals, per kind, per folder, queue |
 | `GET /api/v1/index/events` | Live progress (server-sent events) |
-| `POST /api/v1/reindex` | `{"scope":"all"}`, `{"scope":"folder","id":…}` or `{"scope":"item","id":…}` |
+| `GET /api/v1/index/problems` | Files that failed or were skipped, with the reason (`?limit=&offset=`) |
+| `POST /api/v1/index/scan` | Look for new, changed, moved and deleted files now (`{"folder":…}` for one) |
+| `POST /api/v1/index/pause`, `POST /api/v1/index/resume` | Pause or resume indexing; searches keep working |
+| `POST /api/v1/reindex` | `{"scope":"all"}`, `{"scope":"folder","id":…}`, `{"scope":"item","id":…}` or `{"scope":"problems"}` |
 | `POST /api/v1/search` | By `query`, `item_id` or uploaded `file` (JSON base64, or multipart), with `filters` (types, folders, date range, path glob), `mode`, `limit`, `offset` |
 | `GET /api/v1/items/{id}` | Metadata and segments (`?q=` ranks them) |
-| `GET /api/v1/items/{id}/thumb` | Thumbnail (`?size=`) |
-| `GET /api/v1/items/{id}/preview` | A document page (`?page=`) or a video frame (`?t=`) |
+| `GET /api/v1/items/{id}/thumb` | WebP thumbnail (`?size=`; `?t=` picks a video window's poster) |
+| `GET /api/v1/items/{id}/preview` | A document page (`?page=`) or a video frame (`?t=`), WebP |
 | `GET /api/v1/items/{id}/raw` | The file, with range requests for audio/video seeking |
 | `GET /api/v1/items/{id}/similar` | More like this (`?type=image,video&limit=`) |
 | `GET /api/v1/items/{id}/waveform` | Peak levels of an audio or video file (`?points=`), for drawing a waveform |
@@ -142,12 +150,58 @@ Everything the UI does goes through `/api/v1`. The OpenAPI description is at
 Errors are `{"error": "<code>", "message": "…"}` with codes `bad_request`, `unauthorized`,
 `not_found`, `conflict`, `unsupported`, `not_ready` and `internal`.
 
+## Indexing
+
+`rummage serve` indexes the enabled folders in the background and keeps following them;
+`rummage index` does one pass. Files are found by extension; everything else is ignored, as are
+symlinks, the directories in `index.skip` (plus `.git`, `node_modules` and `__pycache__`), and
+anything matching a folder's `exclude` globs.
+
+| Kind | Files | What is embedded | Locator |
+|---|---|---|---|
+| image | jpg, png, webp, gif, bmp, tiff; heic, heif, avif (through ffmpeg); RAW (its embedded preview) | the picture, upright (EXIF orientation); EXIF date, camera and GPS go into the keyword index and `exif` | |
+| text | txt, md, mdx, code, csv, json, yaml, html, ... | passages of about 1k tokens (4,000 characters) overlapping by 400 characters; the title is the first markdown heading, the HTML `<title>`, or the file name | |
+| doc | pdf | each page's text as passages, and each page as an image (first 300 pages) | page |
+| audio | wav, mp3, flac, ogg, m4a, aac | 16 kHz mono in 30 s windows that overlap by 5 s | `t_start`, `t_end` |
+| video | mp4, m4v, mkv, webm, mov, avi | 1 frame per second in 10 s windows, plus the sound track as audio windows | `t_start`, `t_end` |
+
+Changes are noticed through inotify (one watch per indexed directory; events are batched for
+half a second) and by a full rescan every `index.scan_interval_secs`. A file whose size and
+modification time are unchanged is left alone; same size with a new time is compared by BLAKE3
+hash. A file that appears where another vanished with the same hash is a move: it keeps its
+vectors. A folder whose root is missing (an unmounted disk) is skipped rather than emptied.
+
+Work is queued by priority (searches first, then new and changed files, then the first pass
+and re-indexing) and runs on `index.concurrency` workers. A file that fails is recorded with
+its error (`rummage status --errors`, `GET /api/v1/index/problems`) and the rest carry on;
+`rummage reindex --problems` tries them again. The status shows the measured rate and the
+estimated time left, per folder too.
+
+Outside tools, both optional: **ffmpeg** (and ffprobe) for video and HEIC/AVIF photos, and
+**poppler-utils** (`pdftoppm`, `pdftotext`) for PDF page images and text. Without ffmpeg,
+videos are listed as skipped with the reason; without poppler, PDFs are indexed by their text
+through a built-in reader, without page images. poppler was picked over pdfium because it is a
+standard package next to ffmpeg, while pdfium would mean shipping or downloading a shared
+library beside the binary. A video codec that the installed ffmpeg can't decode (Fedora's
+`ffmpeg-free` has no HEVC) is skipped with that reason too.
+
+Search embeds the query (`task: search result | query: …`), scores every stored vector exactly
+(all vectors are held in memory, at `model.dim` length, and updated as files are indexed), runs
+an FTS5 keyword search over names, paths, text and EXIF, and fuses the two rankings with
+reciprocal-rank fusion. Results are grouped per file with the best-matching segment, so a video
+hit carries the moment and a PDF hit the page; text hits carry a snippet with the matching
+words marked. Thumbnails (WebP, `index.thumbnail_size`) are made while indexing; page and frame
+previews are rendered on first request. Both live under `<data_dir>/thumbs` and
+`<data_dir>/previews`.
+
 ## Development
 
 ```sh
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
+# speed checks (search over 300k vectors, first-pass throughput), on the target machine:
+cargo test --release -p rummage --test bench -- --ignored --nocapture
 ```
 
 ### Web UI

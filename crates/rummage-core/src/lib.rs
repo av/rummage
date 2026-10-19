@@ -6,6 +6,7 @@ pub mod embed;
 pub mod service;
 pub mod store;
 pub mod types;
+pub mod vindex;
 
 pub use config::{Config, ConfigFile};
 pub use embed::{EmbedInput, Embedder, FakeEmbedder, ImageData, Modalities};

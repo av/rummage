@@ -116,17 +116,6 @@ pub struct NewFile {
     pub exif: Option<String>,
 }
 
-/// The fields searches filter on.
-#[derive(Debug, Clone, PartialEq)]
-pub struct FileFacet {
-    pub id: i64,
-    pub kind: Kind,
-    pub folder: String,
-    /// Best known date (`date`, else `mtime`).
-    pub date: i64,
-    pub path: String,
-}
-
 /// A chunk row: one embeddable piece of a file.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct ChunkRow {
@@ -139,6 +128,33 @@ pub struct ChunkRow {
     pub text: Option<String>,
 }
 
+/// What the scanner compares against the disk.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ScanRow {
+    pub id: i64,
+    pub path: String,
+    pub folder: String,
+    pub size: i64,
+    pub mtime: i64,
+    pub hash: Option<String>,
+    pub kind: Kind,
+    pub status: String,
+}
+
+/// A file's metadata after extraction, written together with its chunks.
+#[derive(Debug, Clone, Default)]
+pub struct FileContent {
+    pub size: i64,
+    pub mtime: i64,
+    pub hash: Option<String>,
+    pub date: Option<i64>,
+    pub mime: Option<String>,
+    pub exif: Option<String>,
+    /// `indexed`, `skipped` or `error`.
+    pub status: String,
+    pub error: Option<String>,
+}
+
 /// Counts of files by status, plus chunk/vector totals.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Counts {
@@ -146,6 +162,7 @@ pub struct Counts {
     pub indexed: u64,
     pub pending: u64,
     pub errors: u64,
+    pub skipped: u64,
     pub bytes: u64,
     pub chunks: u64,
     pub vectors: u64,
@@ -157,6 +174,8 @@ pub enum Scope<'a> {
     All,
     Folder(&'a str),
     File(i64),
+    /// Files that failed or were skipped.
+    Problems,
 }
 
 pub struct Store {
@@ -273,6 +292,151 @@ impl Store {
         Ok(())
     }
 
+    /// Moves a file to another path and folder, keeping its chunks and vectors.
+    pub fn move_file(&self, file_id: i64, new_path: &str, folder: &str) -> Result<()> {
+        let name = Path::new(new_path)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| new_path.to_string());
+        self.conn().execute(
+            "UPDATE files SET path = ?2, name = ?3, folder = ?4 WHERE id = ?1",
+            params![file_id, new_path, name, folder],
+        )?;
+        Ok(())
+    }
+
+    /// Records a new size and mtime for a file whose content did not change.
+    pub fn touch_file(&self, file_id: i64, size: i64, mtime: i64) -> Result<()> {
+        self.conn().execute(
+            "UPDATE files SET size = ?2, mtime = ?3 WHERE id = ?1",
+            params![file_id, size, mtime],
+        )?;
+        Ok(())
+    }
+
+    /// Replaces a file's metadata, chunks and vectors in one transaction.
+    /// Returns the new chunk ids, or `None` when the file is no longer in the index.
+    pub fn replace_content(
+        &self,
+        file_id: i64,
+        content: &FileContent,
+        chunks: &[(ChunkRow, Vec<f32>)],
+    ) -> Result<Option<Vec<i64>>> {
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        // The file row goes first: the keyword index copies its EXIF when chunks are inserted.
+        let updated = tx.execute(
+            "UPDATE files SET size = ?2, mtime = ?3, hash = ?4, date = ?5, mime = coalesce(?6, mime),
+                exif = ?7, status = ?8, error = ?9,
+                indexed_at = CASE WHEN ?8 = 'pending' THEN indexed_at ELSE unixepoch() END
+             WHERE id = ?1",
+            params![
+                file_id,
+                content.size,
+                content.mtime,
+                content.hash,
+                content.date,
+                content.mime,
+                content.exif,
+                content.status,
+                content.error
+            ],
+        )?;
+        if updated == 0 {
+            return Ok(None);
+        }
+        tx.execute("DELETE FROM chunks WHERE file_id = ?1", [file_id])?;
+        let mut ids = Vec::with_capacity(chunks.len());
+        {
+            let mut chunk_stmt = tx.prepare_cached(
+                "INSERT INTO chunks (file_id, kind, page, t_start, t_end, text) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            )?;
+            let mut vec_stmt = tx.prepare_cached(
+                "INSERT OR REPLACE INTO vectors (chunk_id, dim, blob) VALUES (?1, ?2, ?3)",
+            )?;
+            for (c, v) in chunks {
+                chunk_stmt.execute(params![
+                    file_id,
+                    c.kind.as_str(),
+                    c.page,
+                    c.t_start,
+                    c.t_end,
+                    c.text
+                ])?;
+                let id = tx.last_insert_rowid();
+                let blob: Vec<u8> = v.iter().flat_map(|x| x.to_le_bytes()).collect();
+                vec_stmt.execute(params![id, v.len() as i64, blob])?;
+                ids.push(id);
+            }
+        }
+        tx.commit()?;
+        Ok(Some(ids))
+    }
+
+    /// Every file row, as the scanner needs it.
+    pub fn scan_rows(&self) -> Result<Vec<ScanRow>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare_cached(
+            "SELECT id, path, folder, size, mtime, hash, kind, status FROM files",
+        )?;
+        let rows = stmt.query_map([], scan_row)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// The file at `path` and every file below it (when `path` is a directory).
+    pub fn scan_rows_under(&self, path: &str) -> Result<Vec<ScanRow>> {
+        let dir = format!("{}/", path.trim_end_matches('/'));
+        // Paths below `dir` sort between `dir` and `dir` with its last '/' replaced by '0'.
+        let end = format!("{}0", path.trim_end_matches('/'));
+        let conn = self.conn();
+        let mut stmt = conn.prepare_cached(
+            "SELECT id, path, folder, size, mtime, hash, kind, status FROM files
+             WHERE path = ?1 OR (path >= ?2 AND path < ?3)",
+        )?;
+        let rows = stmt.query_map(params![path, dir, end], scan_row)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Ids of files waiting to be indexed, oldest first.
+    pub fn pending_files(&self) -> Result<Vec<i64>> {
+        let conn = self.conn();
+        let mut stmt =
+            conn.prepare_cached("SELECT id FROM files WHERE status = 'pending' ORDER BY id")?;
+        let rows = stmt.query_map([], |r| r.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Files that failed or were skipped, newest first, with the total count.
+    pub fn problem_files(&self, limit: usize, offset: usize) -> Result<(u64, Vec<FileRow>)> {
+        let conn = self.conn();
+        let total: i64 = conn.query_row(
+            "SELECT count(*) FROM files WHERE status IN ('error', 'skipped')",
+            [],
+            |r| r.get(0),
+        )?;
+        let mut stmt = conn.prepare_cached(&format!(
+            "SELECT {FILE_COLS} FROM files WHERE status IN ('error', 'skipped')
+             ORDER BY coalesce(indexed_at, 0) DESC, id DESC LIMIT ?1 OFFSET ?2"
+        ))?;
+        let rows = stmt.query_map(params![limit as i64, offset as i64], file_row)?;
+        Ok((total as u64, rows.collect::<rusqlite::Result<_>>()?))
+    }
+
+    /// Ids of a folder's files.
+    pub fn folder_file_ids(&self, folder: &str) -> Result<Vec<i64>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare_cached("SELECT id FROM files WHERE folder = ?1")?;
+        let rows = stmt.query_map([folder], |r| r.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// SQLite's `data_version`: changes when another connection commits to the database.
+    pub fn data_version(&self) -> Result<i64> {
+        Ok(self
+            .conn()
+            .pragma_query_value(None, "data_version", |r| r.get(0))?)
+    }
+
     pub fn delete_file(&self, file_id: i64) -> Result<()> {
         self.conn()
             .execute("DELETE FROM files WHERE id = ?1", [file_id])?;
@@ -321,21 +485,59 @@ impl Store {
         Ok(out)
     }
 
-    /// Ids, kinds, folders, dates and paths of all files, for filtering searches.
-    pub fn file_facets(&self) -> Result<Vec<FileFacet>> {
+    /// Ids of files matching every given condition (empty lists match all); with a `path_ok`
+    /// test, only files whose path passes it.
+    pub fn filtered_files(
+        &self,
+        kinds: &[Kind],
+        folders: &[String],
+        date_from: Option<i64>,
+        date_to: Option<i64>,
+        path_ok: Option<&dyn Fn(&str) -> bool>,
+    ) -> Result<Vec<i64>> {
+        // Without a path test the kind/folder indexes answer alone.
+        let mut sql = String::from(if path_ok.is_some() {
+            "SELECT id, path FROM files WHERE 1"
+        } else {
+            "SELECT id FROM files WHERE 1"
+        });
+        let mut args: Vec<rusqlite::types::Value> = vec![];
+        let mut list = |sql: &mut String, col: &str, values: Vec<String>| {
+            if !values.is_empty() {
+                sql.push_str(&format!(
+                    " AND {col} IN ({})",
+                    vec!["?"; values.len()].join(",")
+                ));
+                args.extend(values.into_iter().map(rusqlite::types::Value::Text));
+            }
+        };
+        list(
+            &mut sql,
+            "kind",
+            kinds.iter().map(|k| k.as_str().to_string()).collect(),
+        );
+        list(&mut sql, "folder", folders.to_vec());
+        if let Some(d) = date_from {
+            sql.push_str(" AND coalesce(date, mtime) >= ?");
+            args.push(d.into());
+        }
+        if let Some(d) = date_to {
+            sql.push_str(" AND coalesce(date, mtime) < ?");
+            args.push(d.into());
+        }
         let conn = self.conn();
-        let mut stmt =
-            conn.prepare_cached("SELECT id, kind, folder, coalesce(date, mtime), path FROM files")?;
-        let rows = stmt.query_map([], |r| {
-            Ok(FileFacet {
-                id: r.get(0)?,
-                kind: Kind::parse(&r.get::<_, String>(1)?).unwrap_or_default(),
-                folder: r.get(2)?,
-                date: r.get(3)?,
-                path: r.get(4)?,
-            })
-        })?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
+        let mut stmt = conn.prepare_cached(&sql)?;
+        let mut rows = stmt.query(rusqlite::params_from_iter(args))?;
+        let mut out = vec![];
+        while let Some(r) = rows.next()? {
+            if let Some(ok) = path_ok
+                && !ok(r.get_ref(1)?.as_str()?)
+            {
+                continue;
+            }
+            out.push(r.get(0)?);
+        }
+        Ok(out)
     }
 
     /// Adds a chunk to a file. Returns its id.
@@ -385,11 +587,11 @@ impl Store {
         Ok(())
     }
 
-    /// Calls `f(chunk_id, file_id, vector)` for every stored vector.
-    pub fn for_each_vector(&self, mut f: impl FnMut(i64, i64, &[f32])) -> Result<()> {
+    /// Calls `f(chunk_id, file_id, kind, vector)` for every stored vector.
+    pub fn for_each_vector(&self, mut f: impl FnMut(i64, i64, SegmentKind, &[f32])) -> Result<()> {
         let conn = self.conn();
         let mut stmt = conn.prepare_cached(
-            "SELECT v.chunk_id, c.file_id, v.blob FROM vectors v JOIN chunks c ON c.id = v.chunk_id",
+            "SELECT v.chunk_id, c.file_id, v.blob, c.kind FROM vectors v JOIN chunks c ON c.id = v.chunk_id",
         )?;
         let mut rows = stmt.query([])?;
         let mut buf = Vec::new();
@@ -402,7 +604,8 @@ impl Store {
                     .iter()
                     .map(|b| f32::from_le_bytes(*b)),
             );
-            f(r.get(0)?, r.get(1)?, &buf);
+            let kind = SegmentKind::parse(r.get_ref(3)?.as_str()?).unwrap_or_default();
+            f(r.get(0)?, r.get(1)?, kind, &buf);
         }
         Ok(())
     }
@@ -462,6 +665,11 @@ impl Store {
                 "UPDATE files SET status = 'pending', error = NULL WHERE id = ?1",
                 [id],
             )?,
+            Scope::Problems => conn.execute(
+                "UPDATE files SET status = 'pending', error = NULL
+                 WHERE status IN ('error', 'skipped')",
+                [],
+            )?,
         })
     }
 
@@ -478,7 +686,8 @@ impl Store {
                     coalesce(sum(status = 'indexed'), 0),
                     coalesce(sum(status = 'pending'), 0),
                     coalesce(sum(status = 'error'), 0),
-                    coalesce(sum(size), 0)
+                    coalesce(sum(size), 0),
+                    coalesce(sum(status = 'skipped'), 0)
                  FROM files {filter}"
             ),
             [arg],
@@ -489,6 +698,7 @@ impl Store {
                     pending: r.get::<_, i64>(2)? as u64,
                     errors: r.get::<_, i64>(3)? as u64,
                     bytes: r.get::<_, i64>(4)? as u64,
+                    skipped: r.get::<_, i64>(5)? as u64,
                     ..Default::default()
                 })
             },
@@ -560,6 +770,19 @@ fn file_row(r: &rusqlite::Row) -> rusqlite::Result<FileRow> {
         status: r.get(11)?,
         error: r.get(12)?,
         indexed_at: r.get(13)?,
+    })
+}
+
+fn scan_row(r: &rusqlite::Row) -> rusqlite::Result<ScanRow> {
+    Ok(ScanRow {
+        id: r.get(0)?,
+        path: r.get(1)?,
+        folder: r.get(2)?,
+        size: r.get(3)?,
+        mtime: r.get(4)?,
+        hash: r.get(5)?,
+        kind: Kind::parse(&r.get::<_, String>(6)?).unwrap_or_default(),
+        status: r.get(7)?,
     })
 }
 
@@ -697,6 +920,75 @@ mod tests {
         assert_eq!(row.name, "a.jpg");
         assert_eq!(s.mark_pending(Scope::Folder("/data")).unwrap(), 1);
         assert_eq!(s.delete_folder("/data").unwrap(), 1);
+    }
+
+    #[test]
+    fn replace_content_moves_and_scan_rows() {
+        let s = Store::open_in_memory().unwrap();
+        let id = s
+            .upsert_file(&file("/data/a/photo.jpg", Kind::Image))
+            .unwrap();
+        let other = s.upsert_file(&file("/data/ab.jpg", Kind::Image)).unwrap();
+        let content = FileContent {
+            size: 11,
+            mtime: 5,
+            hash: Some("h1".into()),
+            exif: Some(r#"{"make":"Canon"}"#.into()),
+            status: "indexed".into(),
+            ..Default::default()
+        };
+        let chunk = |t: &str| ChunkRow {
+            kind: SegmentKind::Text,
+            text: Some(t.into()),
+            ..Default::default()
+        };
+        let ids = s
+            .replace_content(id, &content, &[(chunk("first"), vec![1.0, 0.0])])
+            .unwrap()
+            .unwrap();
+        assert_eq!(ids.len(), 1);
+        assert_eq!(s.keyword_search("canon", 10).unwrap(), vec![(ids[0], id)]);
+        let ids2 = s
+            .replace_content(
+                id,
+                &content,
+                &[
+                    (chunk("second"), vec![0.0, 1.0]),
+                    (chunk("third"), vec![0.6, 0.8]),
+                ],
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(s.chunks(id).unwrap().len(), 2);
+        assert!(s.keyword_search("first", 10).unwrap().is_empty());
+        assert_eq!(s.vectors_for_file(id).unwrap().len(), 2);
+        assert_eq!(s.counts(None).unwrap().indexed, 1);
+        assert!(s.replace_content(999, &content, &[]).unwrap().is_none());
+
+        let under: Vec<i64> = s
+            .scan_rows_under("/data/a")
+            .unwrap()
+            .iter()
+            .map(|r| r.id)
+            .collect();
+        assert_eq!(under, vec![id]);
+        assert_eq!(s.scan_rows().unwrap().len(), 2);
+        assert_eq!(s.pending_files().unwrap(), vec![other]);
+
+        s.move_file(id, "/other/b.jpg", "/other").unwrap();
+        let row = s.file(id).unwrap().unwrap();
+        assert_eq!(
+            (row.name.as_str(), row.folder.as_str()),
+            ("b.jpg", "/other")
+        );
+        assert_eq!(
+            s.vectors_for_file(id).unwrap()[0].0,
+            ids2[0],
+            "a move keeps the vectors"
+        );
+        s.set_status(other, "error", Some("bad")).unwrap();
+        let (total, rows) = s.problem_files(10, 0).unwrap();
+        assert_eq!((total, rows[0].id), (1, other));
     }
 
     #[test]

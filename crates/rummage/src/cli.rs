@@ -2,12 +2,11 @@
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
 use rummage_core::config::{ENV_OVERRIDES, default_config_path, expand_home, patch_for};
-use rummage_core::service::{Service, folder_id};
+use rummage_core::service::folder_id;
 use rummage_core::types::*;
 use rummage_core::{ConfigFile, Store};
 
@@ -55,11 +54,29 @@ pub enum Cmd {
     /// Index the folders now.
     Index {
         /// Index new and changed files, then exit (the default).
-        #[arg(long, conflicts_with = "watch")]
+        #[arg(long, conflicts_with_all = ["watch", "pause", "resume"])]
         once: bool,
         /// Keep running and index changes as they happen.
-        #[arg(long)]
+        #[arg(long, conflicts_with_all = ["pause", "resume"])]
         watch: bool,
+        /// Pause the running server's indexing (searches keep working).
+        #[arg(long, conflicts_with = "resume")]
+        pause: bool,
+        /// Resume the running server's indexing.
+        #[arg(long)]
+        resume: bool,
+    },
+    /// Index files again: everything, a folder, an item, or the ones that failed.
+    Reindex {
+        /// Only this folder (path or id).
+        #[arg(long, value_name = "FOLDER", conflicts_with_all = ["item", "problems"])]
+        folder: Option<String>,
+        /// Only this item id.
+        #[arg(long, value_name = "ID", conflicts_with = "problems")]
+        item: Option<i64>,
+        /// Only the files that failed or were skipped.
+        #[arg(long)]
+        problems: bool,
     },
     /// Search the index.
     Search(SearchArgs),
@@ -68,6 +85,9 @@ pub enum Cmd {
         /// Print JSON.
         #[arg(long)]
         json: bool,
+        /// List the files that failed or were skipped, and why.
+        #[arg(long)]
+        errors: bool,
     },
     /// Read or change the config file.
     #[command(subcommand)]
@@ -102,20 +122,52 @@ pub enum FoldersCmd {
 }
 
 #[derive(Args, Debug)]
+#[command(group(clap::ArgGroup::new("what").required(true).args(["query", "similar", "file"])))]
 pub struct SearchArgs {
     /// What to look for.
-    #[arg(required = true, num_args = 1..)]
+    #[arg(num_args = 1..)]
     pub query: Vec<String>,
+    /// Find items like the indexed item with this id.
+    #[arg(long, value_name = "ID", conflicts_with_all = ["query", "file"])]
+    pub similar: Option<i64>,
+    /// Find items like this file (an image, audio or text file).
+    #[arg(long, value_name = "PATH", conflicts_with = "query")]
+    pub file: Option<PathBuf>,
     /// Only these kinds; repeatable or comma-separated.
     #[arg(long = "type", value_name = "KIND", value_delimiter = ',',
           value_parser = ["image", "video", "audio", "text", "doc"])]
     pub types: Vec<String>,
+    /// Only this folder (path or id); repeatable.
+    #[arg(long, value_name = "FOLDER")]
+    pub folder: Vec<String>,
+    /// Only paths matching this glob, e.g. '**/2024/**'.
+    #[arg(long, value_name = "GLOB")]
+    pub path: Option<String>,
+    /// Only items dated on or after this day (YYYY-MM-DD).
+    #[arg(long, value_name = "DATE", value_parser = parse_day)]
+    pub after: Option<i64>,
+    /// Only items dated before this day (YYYY-MM-DD).
+    #[arg(long, value_name = "DATE", value_parser = parse_day)]
+    pub before: Option<i64>,
+    /// Ranking: meaning and words fused (hybrid), meaning only (vector), or words only (keyword).
+    #[arg(long, default_value = "hybrid", value_parser = ["hybrid", "vector", "keyword"])]
+    pub mode: String,
     /// Number of results.
     #[arg(long, short = 'n', default_value_t = 20)]
     pub limit: u32,
     /// Print JSON.
     #[arg(long)]
     pub json: bool,
+}
+
+/// `YYYY-MM-DD` to Unix seconds (UTC midnight).
+fn parse_day(s: &str) -> Result<i64, String> {
+    let bad = || format!("expected a date like 2024-05-01, got {s:?}");
+    let parts: Vec<&str> = s.split('-').collect();
+    if parts.len() != 3 || parts[0].len() != 4 {
+        return Err(bad());
+    }
+    crate::extract::image::parse_exif_date(s).ok_or_else(bad)
 }
 
 #[derive(Subcommand, Debug)]
@@ -163,9 +215,19 @@ fn run(cli: Cli) -> Result<ExitCode> {
     match cli.cmd {
         Cmd::Serve { bind, base_path } => serve(cf, bind, base_path)?,
         Cmd::Folders(cmd) => folders(connect(cf)?, cmd)?,
-        Cmd::Index { watch, .. } => index(connect(cf)?, watch)?,
+        Cmd::Index {
+            watch,
+            pause,
+            resume,
+            ..
+        } => index(connect(cf)?, watch, pause, resume)?,
+        Cmd::Reindex {
+            folder,
+            item,
+            problems,
+        } => reindex(connect(cf)?, folder, item, problems)?,
         Cmd::Search(args) => search(connect(cf)?, args)?,
-        Cmd::Status { json } => status(connect(cf)?, json)?,
+        Cmd::Status { json, errors } => status(connect(cf)?, json, errors)?,
         Cmd::Config(cmd) => config(cf, cmd, server, cli.local)?,
         Cmd::Doctor => return doctor(cf, server),
     }
@@ -187,10 +249,12 @@ fn serve(cf: ConfigFile, bind: Option<String>, base_path: Option<String>) -> Res
         cf
     };
     let bind = cf.config().server.bind.clone();
-    let embedder = engine::embedder(cf.config())?;
-    let svc = Arc::new(Service::open(cf, embedder)?);
+    let svc = engine::open_service(cf, true)?;
     let rt = tokio::runtime::Runtime::new()?;
-    rt.block_on(server::serve(svc, &bind))
+    let indexer = indexer::start(svc.clone(), indexer::Options { watch: true })?;
+    let served = rt.block_on(server::serve(svc, &bind));
+    indexer.stop();
+    served
 }
 
 fn folders(api: Api, cmd: FoldersCmd) -> Result<()> {
@@ -271,15 +335,33 @@ fn absolute(path: &Path) -> Result<PathBuf> {
     Ok(std::fs::canonicalize(&p).unwrap_or(p))
 }
 
-fn index(api: Api, watch: bool) -> Result<()> {
+fn index(api: Api, watch: bool, pause: bool, resume: bool) -> Result<()> {
+    if pause || resume {
+        let Api::Remote(_) = &api else {
+            anyhow::bail!("no rummage server is running; pausing applies to `rummage serve`");
+        };
+        let s = if pause { api.pause()? } else { api.resume()? };
+        println!("indexing {}", format!("{:?}", s.state).to_lowercase());
+        return Ok(());
+    }
     match api {
         Api::Remote(client) => {
+            if !watch {
+                client.send_empty("POST", "/index/scan", &ScanRequest::default())?;
+            }
             let mut last = None;
             client.follow_events(|e| match e {
                 IndexEvent::Status(s) => {
                     let line = format!(
-                        "{:?}: {}/{} files indexed, {} queued, {} errors",
-                        s.state, s.totals.indexed, s.totals.files, s.queued, s.totals.errors
+                        "{:?}: {}/{} files indexed, {} queued, {} errors{}",
+                        s.state,
+                        s.totals.indexed,
+                        s.totals.files,
+                        s.queued,
+                        s.totals.errors,
+                        s.eta_secs
+                            .map(|e| format!(", about {} left", indexer::human_secs(e)))
+                            .unwrap_or_default()
                     )
                     .to_lowercase();
                     if last.as_ref() != Some(&line) {
@@ -306,18 +388,74 @@ fn index(api: Api, watch: bool) -> Result<()> {
             if watch {
                 tokio::runtime::Runtime::new()?.block_on(indexer::watch(svc))
             } else {
-                indexer::run_once(&svc)
+                indexer::run_once(svc)
             }
         }
     }
 }
 
+fn reindex(api: Api, folder: Option<String>, item: Option<i64>, problems: bool) -> Result<()> {
+    let req = match (folder, item, problems) {
+        (Some(f), _, _) => ReindexRequest::Folder {
+            id: folder_ref(&f)?,
+        },
+        (None, Some(id), _) => ReindexRequest::Item { id },
+        (None, None, true) => ReindexRequest::Problems,
+        (None, None, false) => ReindexRequest::All,
+    };
+    let queued = api.reindex(&req)?.queued;
+    match api {
+        Api::Remote(_) => println!("queued {queued} files; the server is indexing them"),
+        Api::Local(svc) => {
+            eprintln!("queued {queued} files");
+            indexer::run_once(svc)?;
+        }
+    }
+    Ok(())
+}
+
+/// A folder given as a path (or `.`) becomes its id; anything else is taken as an id.
+fn folder_ref(f: &str) -> Result<String> {
+    if f.contains('/') || f.starts_with('~') || f == "." {
+        Ok(folder_id(&absolute(Path::new(f))?.to_string_lossy()))
+    } else {
+        Ok(f.to_string())
+    }
+}
+
 fn search(api: Api, args: SearchArgs) -> Result<()> {
+    let file = match &args.file {
+        Some(p) => {
+            use base64::Engine as _;
+            let bytes = std::fs::read(p).with_context(|| format!("reading {}", p.display()))?;
+            Some(UploadedFile {
+                name: p.file_name().map(|n| n.to_string_lossy().into_owned()),
+                mime: None,
+                data_base64: base64::engine::general_purpose::STANDARD.encode(bytes),
+            })
+        }
+        None => None,
+    };
+    let folders = args
+        .folder
+        .iter()
+        .map(|f| folder_ref(f))
+        .collect::<Result<Vec<_>>>()?;
     let req = SearchRequest {
-        query: Some(args.query.join(" ")),
+        query: (!args.query.is_empty()).then(|| args.query.join(" ")),
+        item_id: args.similar,
+        file,
         filters: Filters {
             types: args.types.iter().filter_map(|t| Kind::parse(t)).collect(),
-            ..Default::default()
+            folders,
+            date_from: args.after,
+            date_to: args.before,
+            path_glob: args.path.clone(),
+        },
+        mode: match args.mode.as_str() {
+            "vector" => SearchMode::Vector,
+            "keyword" => SearchMode::Keyword,
+            _ => SearchMode::Hybrid,
         },
         limit: Some(args.limit),
         ..Default::default()
@@ -335,29 +473,82 @@ fn search(api: Api, args: SearchArgs) -> Result<()> {
             .segment
             .as_ref()
             .map(|s| match (s.page, s.t_start) {
-                (Some(p), _) => format!("  p.{p}"),
-                (None, Some(t)) => format!("  @{}:{:02}", t as u64 / 60, t as u64 % 60),
+                (Some(p), _) => format!("  (page {p})"),
+                (None, Some(t)) => format!("  (at {})", clock(t)),
                 _ => String::new(),
             })
             .unwrap_or_default();
         println!(
-            "{:.3}  {:<5}  {}{at}",
+            "{:>6}  {:.3}  {:<5}  {}{at}",
+            hit.item.id,
             hit.similarity.unwrap_or(hit.score),
             hit.item.kind,
             hit.item.path
         );
+        if let Some(seg) = &hit.segment
+            && !seg.snippet.is_empty()
+        {
+            let bold = std::io::IsTerminal::is_terminal(&std::io::stdout());
+            let text: String = seg
+                .snippet
+                .iter()
+                .map(|s| match (s.hit, bold) {
+                    (true, true) => format!("\x1b[1m{}\x1b[0m", s.text),
+                    _ => s.text.clone(),
+                })
+                .collect();
+            println!(
+                "        {}",
+                text.split_whitespace().collect::<Vec<_>>().join(" ")
+            );
+        }
     }
     Ok(())
 }
 
-fn status(api: Api, json: bool) -> Result<()> {
+/// Seconds as `m:ss` or `h:mm:ss`.
+fn clock(t: f64) -> String {
+    let t = t.max(0.0) as u64;
+    if t >= 3600 {
+        format!("{}:{:02}:{:02}", t / 3600, t % 3600 / 60, t % 60)
+    } else {
+        format!("{}:{:02}", t / 60, t % 60)
+    }
+}
+
+fn status(api: Api, json: bool, errors: bool) -> Result<()> {
     let health = api.health()?;
     let s = api.status()?;
+    let problems = if errors || json {
+        Some(api.problems(if errors { 500 } else { 20 })?)
+    } else {
+        None
+    };
     if json {
         println!(
             "{}",
-            serde_json::to_string_pretty(&serde_json::json!({ "health": health, "index": s }))?
+            serde_json::to_string_pretty(
+                &serde_json::json!({ "health": health, "index": s, "problems": problems })
+            )?
         );
+        return Ok(());
+    }
+    if errors {
+        let p = problems.expect("fetched above");
+        if p.items.is_empty() {
+            println!("no failed or skipped files");
+        }
+        for item in &p.items {
+            println!(
+                "{:<7}  {}: {}",
+                format!("{:?}", item.status).to_lowercase(),
+                item.path,
+                item.error.as_deref().unwrap_or("")
+            );
+        }
+        if p.total > p.items.len() as u64 {
+            println!("... and {} more", p.total - p.items.len() as u64);
+        }
         return Ok(());
     }
     println!(
@@ -367,15 +558,27 @@ fn status(api: Api, json: bool) -> Result<()> {
         health.embedder.name
     );
     println!(
-        "{}: {} files, {} indexed, {} queued, {} errors, {} vectors, {}",
+        "{}: {} files, {} indexed, {} queued, {} errors, {} skipped, {} vectors, {}",
         format!("{:?}", s.state).to_lowercase(),
         s.totals.files,
         s.totals.indexed,
         s.queued,
         s.totals.errors,
+        s.totals.skipped,
         s.totals.vectors,
         human_bytes(s.totals.bytes)
     );
+    if let Some(rate) = s.files_per_min {
+        println!(
+            "rate: {rate:.0} files/min{}",
+            s.eta_secs
+                .map(|e| format!(", about {} left", indexer::human_secs(e)))
+                .unwrap_or_default()
+        );
+    }
+    if let Some(c) = &s.current {
+        println!("working on: {c}");
+    }
     if !s.by_kind.is_empty() {
         let kinds: Vec<String> = s
             .by_kind
@@ -386,8 +589,24 @@ fn status(api: Api, json: bool) -> Result<()> {
     }
     for f in &s.folders {
         println!(
-            "  {}  {}/{} indexed, {} errors",
-            f.path, f.counts.indexed, f.counts.files, f.counts.errors
+            "  {}  {}/{} indexed, {} errors{}{}",
+            f.path,
+            f.counts.indexed,
+            f.counts.files,
+            f.counts.errors,
+            if f.scanning { ", scanning" } else { "" },
+            f.eta_secs
+                .map(|e| format!(", about {} left", indexer::human_secs(e)))
+                .unwrap_or_default()
+        );
+    }
+    for m in &s.messages {
+        println!("note: {m}");
+    }
+    if s.totals.errors + s.totals.skipped > 0 {
+        println!(
+            "see `rummage status --errors` for the files that failed or were skipped, and \
+             `rummage reindex --problems` to try them again"
         );
     }
     Ok(())
@@ -616,6 +835,19 @@ fn doctor(cf: ConfigFile, server: Option<&str>) -> Result<ExitCode> {
         },
     );
 
+    let tools = crate::extract::Tools::detect();
+    check(
+        tools.pdftoppm,
+        true,
+        if tools.pdftoppm {
+            format!(
+                "poppler found: PDF pages are indexed as images{}",
+                if tools.pdftotext { " and text" } else { "" }
+            )
+        } else {
+            "pdftoppm (poppler-utils) not found; PDFs are indexed by text only".into()
+        },
+    );
     match std::process::Command::new("ffmpeg")
         .arg("-version")
         .output()
@@ -712,6 +944,17 @@ mod tests {
         assert!(parse(&["index", "--once"]).is_ok());
         assert!(parse(&["index", "--watch"]).is_ok());
         assert!(parse(&["index", "--once", "--watch"]).is_err());
+        assert!(parse(&["index", "--pause"]).is_ok());
+        assert!(parse(&["index", "--pause", "--resume"]).is_err());
+        assert!(parse(&["search", "--similar", "12"]).is_ok());
+        assert!(parse(&["search", "--file", "/tmp/a.jpg", "--type", "image"]).is_ok());
+        assert!(parse(&["search"]).is_err());
+        assert!(parse(&["search", "x", "--after", "2024-01-01", "--path", "**/a/**"]).is_ok());
+        assert!(parse(&["search", "x", "--after", "yesterday"]).is_err());
+        assert!(parse(&["status", "--errors"]).is_ok());
+        assert!(parse(&["reindex"]).is_ok());
+        assert!(parse(&["reindex", "--problems"]).is_ok());
+        assert!(parse(&["reindex", "--folder", "/tmp", "--item", "3"]).is_err());
         assert!(
             parse(&[
                 "search",
@@ -732,6 +975,12 @@ mod tests {
         assert!(parse(&["config", "path"]).is_ok());
         assert!(parse(&["doctor"]).is_ok());
         assert!(parse(&["status", "--local", "--server", "http://x"]).is_err());
+    }
+
+    #[test]
+    fn clock_times() {
+        assert_eq!(clock(134.4), "2:14");
+        assert_eq!(clock(3725.0), "1:02:05");
     }
 
     #[test]

@@ -35,8 +35,7 @@ impl Api {
                 Err(_) => {}
             }
         }
-        let embedder = crate::engine::embedder(cfg)?;
-        Ok(Api::Local(Arc::new(Service::open(cf, embedder)?)))
+        Ok(Api::Local(crate::engine::open_service(cf, false)?))
     }
 
     pub fn describe(&self) -> String {
@@ -92,6 +91,41 @@ impl Api {
         match self {
             Api::Remote(c) => c.send("POST", "/reindex", req),
             Api::Local(s) => Ok(s.reindex(req)?),
+        }
+    }
+
+    pub fn pause(&self) -> Result<IndexStatus> {
+        match self {
+            Api::Remote(c) => c.send("POST", "/index/pause", &serde_json::json!({})),
+            Api::Local(s) => Ok(s.pause()?),
+        }
+    }
+
+    pub fn resume(&self) -> Result<IndexStatus> {
+        match self {
+            Api::Remote(c) => c.send("POST", "/index/resume", &serde_json::json!({})),
+            Api::Local(s) => Ok(s.resume()?),
+        }
+    }
+
+    /// Asks a running indexer to rescan now.
+    pub fn scan(&self, req: &ScanRequest) -> Result<()> {
+        match self {
+            Api::Remote(c) => c.send_empty("POST", "/index/scan", req),
+            Api::Local(s) => Ok(s.scan(req)?),
+        }
+    }
+
+    pub fn problems(&self, limit: u32) -> Result<ProblemList> {
+        match self {
+            Api::Remote(c) => c.get(&format!("/index/problems?limit={limit}")),
+            Api::Local(s) => Ok(s.problems(
+                &PageParams {
+                    limit: Some(limit),
+                    offset: 0,
+                },
+                "",
+            )?),
         }
     }
 }
@@ -170,6 +204,20 @@ impl Client {
             m => bail!("unsupported method {m}"),
         };
         read(resp)
+    }
+
+    /// Sends a JSON body and expects no response body.
+    pub fn send_empty<B: Serialize>(&self, method: &str, path: &str, body: &B) -> Result<()> {
+        let url = self.url(path);
+        let resp = match method {
+            "POST" => self.auth(self.agent.post(&url)).send_json(body)?,
+            m => bail!("unsupported method {m}"),
+        };
+        if resp.status().is_success() {
+            Ok(())
+        } else {
+            Err(api_error(resp))
+        }
     }
 
     pub fn delete(&self, path: &str) -> Result<()> {

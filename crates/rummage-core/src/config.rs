@@ -201,6 +201,7 @@ impl Default for IndexConfig {
                 ".git",
                 "target",
                 "dist",
+                "build",
                 ".cache",
                 "__pycache__",
                 ".venv",

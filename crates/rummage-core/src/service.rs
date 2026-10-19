@@ -1,18 +1,20 @@
 //! What the API and the CLI do, independent of HTTP. The server wraps a [`Service`] in axum
 //! handlers; the CLI calls it directly when no server is running.
 
-use std::collections::{HashMap, HashSet};
-use std::path::Path;
-use std::sync::{Arc, RwLock};
-use std::time::Instant;
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, RwLock};
+use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use tokio::sync::broadcast;
 
 use crate::config::{Config, ConfigFile, FolderConfig, expand_home, needs_restart};
-use crate::embed::{EmbedInput, Embedder, ImageData, dot, fnv1a, normalize};
-use crate::store::{FileRow, Scope, Store};
+use crate::embed::{EmbedInput, EmbedQueue, Embedder, ImageData, dot, fnv1a, normalize};
+use crate::store::{ChunkRow, FileContent, FileRow, Scope, Store};
 use crate::types::*;
+use crate::vindex::VectorIndex;
 
 /// An error with an HTTP-friendly category.
 #[derive(Debug)]
@@ -79,22 +81,85 @@ struct Fused {
     keyword: bool,
 }
 
-/// All vectors, kept in memory for an exact scan.
-struct VectorCache {
-    fingerprint: (i64, i64),
-    dim: usize,
-    chunk_ids: Vec<i64>,
-    file_ids: Vec<i64>,
-    data: Vec<f32>,
+/// What the service asks of a running indexer.
+#[derive(Debug, Clone, PartialEq)]
+pub enum IndexCommand {
+    /// Files were marked pending: pick them up.
+    Wake,
+    /// Walk one folder (by path) or all of them for changes.
+    Scan(Option<String>),
+    /// The folder list or the index settings changed.
+    ConfigChanged,
+    Pause,
+    Resume,
 }
+
+/// Turns files into searchable content for search-by-file uploads (decoding images and audio
+/// the same way the indexer does). Returns `None` for kinds it doesn't handle.
+pub trait UploadDecoder: Send + Sync {
+    fn decode(
+        &self,
+        name: Option<&str>,
+        mime: &str,
+        bytes: &[u8],
+    ) -> Option<anyhow::Result<EmbedInput>>;
+}
+
+/// What a running indexer reports, for `/index/status`.
+#[derive(Default)]
+pub struct Live {
+    /// True while an indexer runs in this process.
+    pub attached: bool,
+    /// Folders (paths) being walked.
+    pub scanning: HashSet<String>,
+    /// True while files are queued or being worked on.
+    pub busy: bool,
+    /// The file most recently started.
+    pub current: Option<String>,
+    /// Notes for the user, e.g. a missing ffmpeg.
+    pub messages: Vec<String>,
+    done: VecDeque<Instant>,
+    last_status: Option<Instant>,
+}
+
+impl Live {
+    /// Files per second over the last minute, once there is enough to measure.
+    fn rate(&mut self) -> Option<f64> {
+        let now = Instant::now();
+        while self
+            .done
+            .front()
+            .is_some_and(|t| now.duration_since(*t) > RATE_WINDOW)
+        {
+            self.done.pop_front();
+        }
+        let (first, last) = (self.done.front()?, self.done.back()?);
+        let span = last.duration_since(*first).as_secs_f64();
+        (self.done.len() >= 2 && span > 0.0).then(|| (self.done.len() - 1) as f64 / span)
+    }
+}
+
+const RATE_WINDOW: Duration = Duration::from_secs(60);
+const MODEL_LOADING: &str =
+    "the embedding model is still loading (it downloads on first start); try again shortly";
+/// Least time between two status events pushed while indexing.
+const STATUS_EVERY: Duration = Duration::from_millis(500);
+
+type IndexLink = Box<dyn Fn(IndexCommand) + Send + Sync>;
 
 pub struct Service {
     config: RwLock<ConfigFile>,
     started_config: Config,
     store: Store,
-    embedder: Arc<dyn Embedder>,
+    embeds: EmbedQueue,
     events: broadcast::Sender<IndexEvent>,
-    vectors: RwLock<Option<Arc<VectorCache>>>,
+    /// Loaded on first search, then updated as files are indexed; with the store's
+    /// `data_version` at load time (another process writing forces a reload).
+    vectors: RwLock<Option<(VectorIndex, i64)>>,
+    live: Mutex<Live>,
+    paused: AtomicBool,
+    link: RwLock<Option<IndexLink>>,
+    decoder: RwLock<Option<Arc<dyn UploadDecoder>>>,
     started: Instant,
 }
 
@@ -111,9 +176,13 @@ impl Service {
             started_config: config.config().clone(),
             config: RwLock::new(config),
             store,
-            embedder,
+            embeds: EmbedQueue::new(embedder),
             events,
             vectors: RwLock::new(None),
+            live: Mutex::new(Live::default()),
+            paused: AtomicBool::new(false),
+            link: RwLock::new(None),
+            decoder: RwLock::new(None),
             started: Instant::now(),
         }
     }
@@ -123,7 +192,138 @@ impl Service {
     }
 
     pub fn embedder(&self) -> &Arc<dyn Embedder> {
-        &self.embedder
+        self.embeds.embedder()
+    }
+
+    /// Embeds for the indexer; searches go first.
+    pub fn embed_background(&self, inputs: &[EmbedInput]) -> anyhow::Result<Vec<Vec<f32>>> {
+        self.embeds.background(inputs)
+    }
+
+    /// Sets how uploaded files are decoded for search-by-file.
+    pub fn set_decoder(&self, decoder: Arc<dyn UploadDecoder>) {
+        *self.decoder.write().unwrap() = Some(decoder);
+    }
+
+    // ---- the indexer's side ----
+
+    /// Connects a running indexer: the service sends it commands through `link`.
+    pub fn attach_indexer(&self, link: impl Fn(IndexCommand) + Send + Sync + 'static) {
+        *self.link.write().unwrap() = Some(Box::new(link));
+        self.live().attached = true;
+    }
+
+    pub fn detach_indexer(&self) {
+        *self.link.write().unwrap() = None;
+        let mut live = self.live();
+        live.attached = false;
+        live.busy = false;
+        live.scanning.clear();
+        live.current = None;
+    }
+
+    fn command(&self, cmd: IndexCommand) {
+        if let Some(link) = self.link.read().unwrap().as_ref() {
+            link(cmd);
+        }
+    }
+
+    /// The indexer's live state.
+    pub fn live(&self) -> MutexGuard<'_, Live> {
+        self.live.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    pub fn is_paused(&self) -> bool {
+        self.paused.load(Ordering::Relaxed)
+    }
+
+    /// Records a finished (or failed) file and tells subscribers.
+    pub fn file_done(&self, event: IndexEvent) {
+        self.live().done.push_back(Instant::now());
+        self.publish(event);
+        self.publish_status_soon();
+    }
+
+    /// Stores a file's extracted content and vectors, and makes them searchable.
+    /// Returns the chunk ids, or `None` when the file left the index meanwhile.
+    pub fn store_file(
+        &self,
+        file_id: i64,
+        content: &FileContent,
+        chunks: Vec<(ChunkRow, Vec<f32>)>,
+    ) -> anyhow::Result<Option<Vec<i64>>> {
+        let Some(ids) = self.store.replace_content(file_id, content, &chunks)? else {
+            return Ok(None);
+        };
+        if let Some((ix, _)) = self.vectors.write().unwrap().as_mut() {
+            let rows: Vec<(i64, SegmentKind, Vec<f32>)> = ids
+                .iter()
+                .zip(chunks)
+                .map(|(id, (c, v))| (*id, c.kind, v))
+                .collect();
+            ix.set_file(file_id, &rows);
+        }
+        Ok(Some(ids))
+    }
+
+    /// Drops a file from the index, with its thumbnails and previews.
+    pub fn remove_file(&self, file_id: i64) -> anyhow::Result<()> {
+        self.store.delete_file(file_id)?;
+        if let Some((ix, _)) = self.vectors.write().unwrap().as_mut() {
+            ix.remove_file(file_id);
+        }
+        self.clear_renders(file_id);
+        Ok(())
+    }
+
+    /// Deletes the cached thumbnails and previews of a file.
+    pub fn clear_renders(&self, file_id: i64) {
+        let data = self.config().data_dir();
+        for dir in ["thumbs", "previews"] {
+            let _ = std::fs::remove_dir_all(data.join(dir).join(file_id.to_string()));
+        }
+    }
+
+    /// Pauses indexing (searches keep working).
+    pub fn pause(&self) -> Result<IndexStatus> {
+        self.paused.store(true, Ordering::Relaxed);
+        self.command(IndexCommand::Pause);
+        self.publish_status();
+        self.index_status()
+    }
+
+    pub fn resume(&self) -> Result<IndexStatus> {
+        self.paused.store(false, Ordering::Relaxed);
+        self.command(IndexCommand::Resume);
+        self.publish_status();
+        self.index_status()
+    }
+
+    /// Asks the indexer to walk one folder (or all) for changes now.
+    pub fn scan(&self, req: &ScanRequest) -> Result<()> {
+        let folder = match req.folder.as_deref().filter(|f| !f.trim().is_empty()) {
+            Some(id) => Some(self.folder(id)?.path),
+            None => None,
+        };
+        if !self.live().attached {
+            return Err(Error::NotReady(
+                "no indexer is running here; start `rummage serve` or run `rummage index`".into(),
+            ));
+        }
+        self.command(IndexCommand::Scan(folder));
+        Ok(())
+    }
+
+    /// Files that failed to index or were skipped.
+    pub fn problems(&self, params: &PageParams, prefix: &str) -> Result<ProblemList> {
+        let limit = params.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
+        let (total, rows) = self
+            .store
+            .problem_files(limit as usize, params.offset as usize)?;
+        Ok(ProblemList {
+            total,
+            items: rows.iter().map(|f| self.item_view(f, prefix)).collect(),
+        })
     }
 
     /// A snapshot of the effective config.
@@ -154,9 +354,9 @@ impl Service {
 
     pub fn embedder_info(&self) -> EmbedderInfo {
         EmbedderInfo {
-            name: self.embedder.name(),
-            dim: self.embedder.dim() as u32,
-            modalities: self.embedder.modalities(),
+            name: self.embedder().name(),
+            dim: self.embedder().dim() as u32,
+            modalities: self.embedder().modalities(),
         }
     }
 
@@ -239,6 +439,7 @@ impl Service {
             });
             Ok(())
         })?;
+        self.command(IndexCommand::ConfigChanged);
         self.folder(&folder_id(&path_str))
     }
 
@@ -260,6 +461,7 @@ impl Service {
             }
             Ok(())
         })?;
+        self.command(IndexCommand::ConfigChanged);
         self.folder(&target.id)
     }
 
@@ -270,7 +472,13 @@ impl Service {
             folders.retain(|f| expand_home(&f.path) != Path::new(&target.path));
             Ok(())
         })?;
+        self.command(IndexCommand::ConfigChanged);
+        let ids = self.store.folder_file_ids(&target.path)?;
         self.store.delete_folder(&target.path)?;
+        if let Some((ix, _)) = self.vectors.write().unwrap().as_mut() {
+            ids.iter().for_each(|id| ix.remove_file(*id));
+        }
+        ids.iter().for_each(|id| self.clear_renders(*id));
         self.publish_status();
         Ok(())
     }
@@ -315,36 +523,80 @@ impl Service {
 
     pub fn index_status(&self) -> Result<IndexStatus> {
         let totals: IndexCounts = self.store.counts(None)?.into();
+        let folders = self.folders()?;
+        let by_kind = self.store.kind_counts()?;
+        let mut live = self.live();
+        let rate = live.rate();
+        let eta = |pending: u64| {
+            rate.filter(|_| pending > 0)
+                .map(|r| (pending as f64 / r).ceil() as u64)
+        };
+        let state = if self.is_paused() {
+            IndexState::Paused
+        } else if !live.scanning.is_empty() {
+            IndexState::Scanning
+        } else if live.busy {
+            IndexState::Indexing
+        } else {
+            IndexState::Idle
+        };
         Ok(IndexStatus {
-            state: IndexState::Idle,
+            state,
             queued: totals.pending,
+            files_per_min: rate.map(|r| r * 60.0),
+            eta_secs: eta(totals.pending),
             totals,
-            by_kind: self
-                .store
-                .kind_counts()?
+            by_kind: by_kind
                 .into_iter()
                 .map(|(kind, files)| KindCount { kind, files })
                 .collect(),
-            folders: self
-                .folders()?
+            folders: folders
                 .into_iter()
                 .map(|f| FolderProgress {
+                    scanning: live.scanning.contains(&f.path),
+                    eta_secs: eta(f.counts.pending),
                     id: f.id,
                     path: f.path,
                     counts: f.counts,
                 })
                 .collect(),
-            current: None,
-            files_per_min: None,
-            eta_secs: None,
+            current: live
+                .current
+                .clone()
+                .filter(|_| state == IndexState::Indexing),
+            messages: {
+                let mut m = live.messages.clone();
+                if !self.embedder().ready() {
+                    m.push(
+                        "The embedding model is not ready: it is loading (it downloads on \
+                         first start) or failed to load (see the log); until then searches match \
+                         words only and indexing waits."
+                            .into(),
+                    );
+                }
+                m
+            },
         })
     }
 
-    fn publish_status(&self) {
+    /// Pushes a status snapshot to subscribers.
+    pub fn publish_status(&self) {
         if self.events.receiver_count() > 0
             && let Ok(s) = self.index_status()
         {
+            self.live().last_status = Some(Instant::now());
             self.publish(IndexEvent::Status(s));
+        }
+    }
+
+    /// Like [`Service::publish_status`], at most every [`STATUS_EVERY`].
+    pub fn publish_status_soon(&self) {
+        let due = self
+            .live()
+            .last_status
+            .is_none_or(|t| t.elapsed() >= STATUS_EVERY);
+        if due {
+            self.publish_status();
         }
     }
 
@@ -360,7 +612,9 @@ impl Service {
                 self.file_row(*id)?;
                 self.store.mark_pending(Scope::File(*id))?
             }
+            ReindexRequest::Problems => self.store.mark_pending(Scope::Problems)?,
         };
+        self.command(IndexCommand::Wake);
         self.publish_status();
         Ok(ReindexResponse {
             queued: queued as u64,
@@ -405,9 +659,18 @@ impl Service {
     /// Applies a JSON merge patch to the config file.
     pub fn patch_settings(&self, patch: &serde_json::Value) -> Result<SettingsView> {
         let mut cf = self.config.write().unwrap();
-        cf.apply_patch(patch)
+        let changed = cf
+            .apply_patch(patch)
             .map_err(|e| Error::BadRequest(format!("{e:#}")))?;
-        Ok(self.settings_view(&cf))
+        let view = self.settings_view(&cf);
+        drop(cf);
+        if changed
+            .iter()
+            .any(|k| k.starts_with("folders") || k.starts_with("index."))
+        {
+            self.command(IndexCommand::ConfigChanged);
+        }
+        Ok(view)
     }
 
     // ---- items ----
@@ -456,9 +719,12 @@ impl Service {
                 t_end: c.t_end,
                 text: c.text,
                 score: None,
+                snippet: vec![],
             })
             .collect();
-        if let Some(q) = q.filter(|q| !q.trim().is_empty()) {
+        if let Some(q) = q.filter(|q| !q.trim().is_empty())
+            && self.embedder().ready()
+        {
             let qv = self.embed_one(EmbedInput::Query(q.into()))?;
             let scores: HashMap<i64, f32> = self
                 .store
@@ -484,12 +750,13 @@ impl Service {
         Ok((f.path, f.mime))
     }
 
-    /// Where a cached thumbnail or preview for `id` would be (`thumbs/<id>-<variant>.jpg`).
-    pub fn cache_path(&self, dir: &str, id: i64, variant: &str) -> std::path::PathBuf {
+    /// Where a cached thumbnail or preview of `id` is kept (`<data_dir>/<dir>/<id>/<variant>.webp`).
+    pub fn cache_path(&self, dir: &str, id: i64, variant: &str) -> PathBuf {
         self.config()
             .data_dir()
             .join(dir)
-            .join(format!("{id}-{variant}.jpg"))
+            .join(id.to_string())
+            .join(format!("{variant}.webp"))
     }
 
     pub fn item_kind(&self, id: i64) -> Result<Kind> {
@@ -522,14 +789,14 @@ impl Service {
     // ---- search ----
 
     fn embed_one(&self, input: EmbedInput) -> Result<Vec<f32>> {
-        if !self.embedder.modalities().supports(&input) {
+        if !self.embedder().modalities().supports(&input) {
             return Err(Error::Unsupported(
                 "the embedding model can't read this kind of input".into(),
             ));
         }
         let mut v = self
-            .embedder
-            .embed(std::slice::from_ref(&input))?
+            .embeds
+            .query(std::slice::from_ref(&input))?
             .pop()
             .context("embedder returned nothing")?;
         normalize(&mut v);
@@ -547,6 +814,12 @@ impl Service {
             .map(str::to_string)
             .or_else(|| name.and_then(|n| mime_guess::from_path(n).first_raw().map(String::from)))
             .unwrap_or_default();
+        let decoder = self.decoder.read().unwrap().clone();
+        if let Some(input) = decoder.and_then(|d| d.decode(name, &mime, &bytes)) {
+            let input = input
+                .map_err(|e| Error::BadRequest(format!("can't read the uploaded file: {e:#}")))?;
+            return self.embed_one(input);
+        }
         if mime.starts_with("image/") {
             self.embed_one(EmbedInput::Image(ImageData::Encoded(bytes)))
         } else if mime.starts_with("text/")
@@ -560,7 +833,7 @@ impl Service {
             })
         } else {
             Err(Error::Unsupported(format!(
-                "searching by {} files is not supported yet; use an image or text file",
+                "searching by {} files is not supported; use an image, audio or text file",
                 if mime.is_empty() {
                     "this kind of"
                 } else {
@@ -582,7 +855,15 @@ impl Service {
         if req.mode == SearchMode::Keyword {
             return Ok(None);
         }
+        let ready = self.embedder().ready();
         if let Some(q) = &req.query {
+            if !ready {
+                // Don't make a search wait for the model to load: match words for now.
+                if req.mode == SearchMode::Hybrid {
+                    return Ok(None);
+                }
+                return Err(Error::NotReady(MODEL_LOADING.into()));
+            }
             return self.embed_one(EmbedInput::Query(q.clone())).map(Some);
         }
         if let Some(id) = req.item_id {
@@ -600,6 +881,9 @@ impl Service {
             return Ok(Some(mean));
         }
         let file = req.file.as_ref().expect("checked above");
+        if !ready {
+            return Err(Error::NotReady(MODEL_LOADING.into()));
+        }
         use base64::Engine as _;
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(file.data_base64.trim())
@@ -617,6 +901,9 @@ impl Service {
         bytes: Vec<u8>,
         prefix: &str,
     ) -> Result<SearchResponse> {
+        if !self.embedder().ready() {
+            return Err(Error::NotReady(MODEL_LOADING.into()));
+        }
         let qv = self.embed_upload(name.as_deref(), mime.as_deref(), bytes)?;
         req.query = None;
         req.item_id = None;
@@ -668,19 +955,31 @@ impl Service {
             .into_iter()
             .map(|f| (f.id, f))
             .collect();
+        let words = req.query.as_deref().map(query_words).unwrap_or_default();
         let mut hits = Vec::with_capacity(page.len());
         for (file_id, f) in page {
             let Some(row) = files.get(file_id) else {
                 continue;
             };
-            let segment = self.store.chunk(f.chunk)?.map(|c| Segment {
-                id: c.id,
-                kind: c.kind,
-                page: c.page,
-                t_start: c.t_start,
-                t_end: c.t_end,
-                text: c.text.map(|t| excerpt(&t, 300)),
-                score: f.similarity,
+            let segment = self.store.chunk(f.chunk)?.map(|c| {
+                let snippet = c
+                    .text
+                    .as_deref()
+                    .map(|t| snippet(t, &words, SNIPPET_CHARS))
+                    .unwrap_or_default();
+                Segment {
+                    id: c.id,
+                    kind: c.kind,
+                    page: c.page,
+                    t_start: c.t_start,
+                    t_end: c.t_end,
+                    text: c
+                        .text
+                        .as_ref()
+                        .map(|_| snippet.iter().map(|s| s.text.as_str()).collect()),
+                    score: f.similarity,
+                    snippet,
+                }
             });
             hits.push(SearchHit {
                 item: self.item_view(row, prefix),
@@ -718,28 +1017,14 @@ impl Service {
 
         // Best chunk per file from the vector scan, ranked.
         let mut vector_hits: Vec<(i64, i64, f32)> = vec![];
-        if let Some(qv) = qv
+        if let Some(qv) = &qv
             && req.mode != SearchMode::Keyword
         {
-            let cache = self.vector_cache()?;
-            if cache.dim > 0 && cache.dim <= qv.len() {
-                let q = truncated(qv, cache.dim);
-                let mut best: HashMap<i64, (i64, f32)> = HashMap::new();
-                for (i, row) in cache.data.chunks_exact(cache.dim).enumerate() {
-                    let file_id = cache.file_ids[i];
-                    if !ok(file_id) {
-                        continue;
-                    }
-                    let s = dot(row, &q);
-                    let e = best.entry(file_id).or_insert((cache.chunk_ids[i], s));
-                    if s > e.1 {
-                        *e = (cache.chunk_ids[i], s);
-                    }
-                }
-                vector_hits = best.into_iter().map(|(f, (c, s))| (f, c, s)).collect();
-                vector_hits.sort_by(|a, b| b.2.total_cmp(&a.2));
-                vector_hits.truncate(pool);
-            }
+            vector_hits = self
+                .with_vectors(|ix| ix.search(qv, pool, ok))?
+                .into_iter()
+                .map(|h| (h.file_id, h.chunk_id, h.score))
+                .collect();
         }
 
         // Best chunk per file from the keyword index, ranked.
@@ -823,50 +1108,147 @@ impl Service {
             .iter()
             .map(|id| self.folder(id).map(|f| f.path))
             .collect::<Result<_>>()?;
+        let path_ok = glob.map(|g| move |p: &str| g.is_match(p));
         Ok(Some(
             self.store
-                .file_facets()?
+                .filtered_files(
+                    &filters.types,
+                    &folders,
+                    filters.date_from,
+                    filters.date_to,
+                    path_ok.as_ref().map(|f| f as &dyn Fn(&str) -> bool),
+                )?
                 .into_iter()
-                .filter(|f| {
-                    (filters.types.is_empty() || filters.types.contains(&f.kind))
-                        && (folders.is_empty() || folders.contains(&f.folder))
-                        && filters.date_from.is_none_or(|d| f.date >= d)
-                        && filters.date_to.is_none_or(|d| f.date < d)
-                        && glob.as_ref().is_none_or(|g| g.is_match(&f.path))
-                })
-                .map(|f| f.id)
                 .collect(),
         ))
     }
 
-    fn vector_cache(&self) -> Result<Arc<VectorCache>> {
-        let fp = self.store.vectors_fingerprint()?;
-        if let Some(c) = self.vectors.read().unwrap().as_ref()
-            && c.fingerprint == fp
+    /// Runs `f` on the in-memory vectors, loading them first if needed (or if another process
+    /// changed the database since).
+    fn with_vectors<R>(&self, f: impl FnOnce(&VectorIndex) -> R) -> Result<R> {
+        let version = self.store.data_version()?;
         {
-            return Ok(c.clone());
+            let guard = self.vectors.read().unwrap();
+            if let Some((ix, v)) = guard.as_ref()
+                && *v == version
+            {
+                return Ok(f(ix));
+            }
         }
-        let mut cache = VectorCache {
-            fingerprint: fp,
-            dim: 0,
-            chunk_ids: vec![],
-            file_ids: vec![],
-            data: vec![],
-        };
-        self.store.for_each_vector(|chunk, file, v| {
-            if cache.dim == 0 {
-                cache.dim = v.len();
-            }
-            if v.len() == cache.dim {
-                cache.chunk_ids.push(chunk);
-                cache.file_ids.push(file);
-                cache.data.extend_from_slice(v);
-            }
-        })?;
-        let cache = Arc::new(cache);
-        *self.vectors.write().unwrap() = Some(cache.clone());
-        Ok(cache)
+        let mut guard = self.vectors.write().unwrap();
+        let version = self.store.data_version()?;
+        if guard.as_ref().is_none_or(|(_, v)| *v != version) {
+            let started = Instant::now();
+            let mut ix = VectorIndex::new(self.embedder().dim());
+            self.store.for_each_vector(|chunk, file, kind, v| {
+                ix.push(file, chunk, kind, v);
+            })?;
+            tracing::debug!(
+                "loaded {} vectors in {:.0} ms",
+                ix.len(),
+                started.elapsed().as_secs_f64() * 1000.0
+            );
+            *guard = Some((ix, version));
+        }
+        Ok(f(&guard.as_ref().expect("loaded above").0))
     }
+}
+
+/// Longest snippet returned with a search hit, in characters.
+const SNIPPET_CHARS: usize = 300;
+
+/// The words of a query, lowercased, for highlighting.
+fn query_words(q: &str) -> Vec<String> {
+    q.split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .map(|w| w.to_lowercase())
+        .collect()
+}
+
+/// A window of about `max_chars` characters of `text` around its densest run of query words,
+/// cut into spans; words that start with a query word are marked.
+fn snippet(text: &str, words: &[String], max_chars: usize) -> Vec<TextSpan> {
+    // Byte ranges of the matching words.
+    let mut matches: Vec<(usize, usize)> = vec![];
+    if !words.is_empty() {
+        let mut start = None;
+        for (i, c) in text
+            .char_indices()
+            .chain(std::iter::once((text.len(), ' ')))
+        {
+            match (c.is_alphanumeric(), start) {
+                (true, None) => start = Some(i),
+                (false, Some(s)) => {
+                    let word = text[s..i].to_lowercase();
+                    if words.iter().any(|w| word.starts_with(w.as_str())) {
+                        matches.push((s, i));
+                    }
+                    start = None;
+                }
+                _ => {}
+            }
+        }
+    }
+    // Start a little before the match with the most matches after it inside the window.
+    let window = max_chars * 3 / 4;
+    let best = (0..matches.len()).max_by_key(|&i| {
+        let end = text[matches[i].0..]
+            .char_indices()
+            .nth(window)
+            .map(|(b, _)| matches[i].0 + b)
+            .unwrap_or(text.len());
+        let n = matches[i..].iter().take_while(|m| m.1 <= end).count();
+        (n, std::cmp::Reverse(i))
+    });
+    let from = match best {
+        Some(i) => {
+            let at = matches[i].0;
+            let lead = text[..at]
+                .char_indices()
+                .rev()
+                .nth(max_chars / 5)
+                .map(|(b, _)| b)
+                .unwrap_or(0);
+            if lead == 0 {
+                0
+            } else {
+                // Begin at a word boundary.
+                text[lead..at]
+                    .find(char::is_whitespace)
+                    .map(|w| lead + w + 1)
+                    .unwrap_or(at)
+            }
+        }
+        None => 0,
+    };
+    let to = text[from..]
+        .char_indices()
+        .nth(max_chars)
+        .map(|(b, _)| from + b)
+        .unwrap_or(text.len());
+    let mut spans = vec![];
+    let mut push = |s: &str, hit: bool| {
+        if !s.is_empty() {
+            spans.push(TextSpan {
+                text: s.to_string(),
+                hit,
+            });
+        }
+    };
+    if from > 0 {
+        push("…", false);
+    }
+    let mut pos = from;
+    for (s, e) in matches.into_iter().filter(|(s, e)| *s >= from && *e <= to) {
+        push(&text[pos..s], false);
+        push(&text[s..e], true);
+        pos = e;
+    }
+    push(&text[pos..to], false);
+    if to < text.len() {
+        push("…", false);
+    }
+    spans
 }
 
 /// The first `dim` numbers of `v`, renormalised.
@@ -876,13 +1258,6 @@ fn truncated(v: &[f32], dim: usize) -> Vec<f32> {
     out
 }
 
-fn excerpt(text: &str, max_chars: usize) -> String {
-    match text.char_indices().nth(max_chars) {
-        Some((i, _)) => format!("{}…", &text[..i]),
-        None => text.to_string(),
-    }
-}
-
 /// Parses `image,video` into kinds.
 pub fn parse_kinds(s: &str) -> Result<Vec<Kind>> {
     s.split(',')
@@ -890,4 +1265,42 @@ pub fn parse_kinds(s: &str) -> Result<Vec<Kind>> {
         .filter(|s| !s.is_empty())
         .map(|k| Kind::parse(k).ok_or_else(|| Error::BadRequest(format!("unknown type {k:?}"))))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn render(spans: &[TextSpan]) -> String {
+        spans
+            .iter()
+            .map(|s| {
+                if s.hit {
+                    format!("[{}]", s.text)
+                } else {
+                    s.text.clone()
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn snippets_mark_query_words() {
+        let words = query_words("Red bicy");
+        assert_eq!(
+            render(&snippet("A red bicycle, reddish.", &words, 100)),
+            "A [red] [bicycle], [reddish]."
+        );
+        let long = format!("{} the red bicycle {}", "x ".repeat(500), "y ".repeat(500));
+        let out = render(&snippet(&long, &words, 60));
+        assert!(out.starts_with('…') && out.ends_with('…'), "{out}");
+        assert!(out.contains("[red] [bicycle]"), "{out}");
+        assert!(out.chars().count() < 70, "{out}");
+        assert_eq!(render(&snippet("no match here", &words, 5)), "no ma…");
+        assert!(snippet("", &words, 5).is_empty());
+        assert_eq!(
+            render(&snippet("Zürich straße", &query_words("STRASSE zür"), 50)),
+            "[Zürich] straße"
+        );
+    }
 }

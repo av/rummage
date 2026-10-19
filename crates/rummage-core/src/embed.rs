@@ -19,6 +19,11 @@ pub trait Embedder: Send + Sync {
     fn name(&self) -> String {
         "unnamed".into()
     }
+    /// False while the model loads in the background (or after it failed to load). Searches
+    /// then match keywords only instead of waiting.
+    fn ready(&self) -> bool {
+        true
+    }
 }
 
 /// One thing to embed. Text prefixes are applied by the engine, not by callers.
@@ -110,7 +115,30 @@ pub fn normalize(v: &mut [f32]) {
 }
 
 /// Dot product of two equal-length vectors (cosine similarity for unit vectors).
+/// Uses AVX2 and FMA when the CPU has them.
 pub fn dot(a: &[f32], b: &[f32]) -> f32 {
+    dot_fn()(a, b)
+}
+
+/// The fastest dot product this CPU supports, picked once; call it in hot loops.
+pub fn dot_fn() -> fn(&[f32], &[f32]) -> f32 {
+    #[cfg(target_arch = "x86_64")]
+    {
+        static AVX2: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if *AVX2.get_or_init(|| {
+            std::arch::is_x86_feature_detected!("avx2")
+                && std::arch::is_x86_feature_detected!("fma")
+        }) {
+            return |a, b| {
+                // SAFETY: the CPU supports AVX2 and FMA (checked above).
+                unsafe { dot_avx2(a, b) }
+            };
+        }
+    }
+    dot_portable
+}
+
+fn dot_portable(a: &[f32], b: &[f32]) -> f32 {
     debug_assert_eq!(a.len(), b.len());
     let mut acc = [0f32; 8];
     let (ca, ra) = a.as_chunks::<8>();
@@ -122,6 +150,92 @@ pub fn dot(a: &[f32], b: &[f32]) -> f32 {
         }
     }
     acc.iter().sum::<f32>() + tail
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn dot_avx2(a: &[f32], b: &[f32]) -> f32 {
+    use std::arch::x86_64::*;
+    let n = a.len().min(b.len());
+    let (pa, pb) = (a.as_ptr(), b.as_ptr());
+    let mut acc = [_mm256_setzero_ps(); 4];
+    let mut i = 0;
+    // SAFETY: every load reads 8 floats at offsets below `n`.
+    unsafe {
+        while i + 32 <= n {
+            for (k, acc) in acc.iter_mut().enumerate() {
+                let x = _mm256_loadu_ps(pa.add(i + k * 8));
+                let y = _mm256_loadu_ps(pb.add(i + k * 8));
+                *acc = _mm256_fmadd_ps(x, y, *acc);
+            }
+            i += 32;
+        }
+        while i + 8 <= n {
+            acc[0] = _mm256_fmadd_ps(
+                _mm256_loadu_ps(pa.add(i)),
+                _mm256_loadu_ps(pb.add(i)),
+                acc[0],
+            );
+            i += 8;
+        }
+        let sum = _mm256_add_ps(_mm256_add_ps(acc[0], acc[1]), _mm256_add_ps(acc[2], acc[3]));
+        let mut lanes = [0f32; 8];
+        _mm256_storeu_ps(lanes.as_mut_ptr(), sum);
+        let mut total: f32 = lanes.iter().sum();
+        while i < n {
+            total += *pa.add(i) * *pb.add(i);
+            i += 1;
+        }
+        total
+    }
+}
+
+/// Shares one embedder between searches and the indexer, searches first: a background
+/// (indexing) call waits while any search is embedding, so a query waits at most for the
+/// one indexing call already running.
+pub struct EmbedQueue {
+    inner: std::sync::Arc<dyn Embedder>,
+    background: std::sync::Mutex<()>,
+    queries: std::sync::Mutex<usize>,
+    idle: std::sync::Condvar,
+}
+
+impl EmbedQueue {
+    pub fn new(inner: std::sync::Arc<dyn Embedder>) -> Self {
+        Self {
+            inner,
+            background: std::sync::Mutex::new(()),
+            queries: std::sync::Mutex::new(0),
+            idle: std::sync::Condvar::new(),
+        }
+    }
+
+    pub fn embedder(&self) -> &std::sync::Arc<dyn Embedder> {
+        &self.inner
+    }
+
+    /// Embeds for a search, ahead of any waiting indexing work.
+    pub fn query(&self, inputs: &[EmbedInput]) -> Result<Vec<Vec<f32>>> {
+        *self.queries.lock().unwrap_or_else(|e| e.into_inner()) += 1;
+        let out = self.inner.embed(inputs);
+        let mut n = self.queries.lock().unwrap_or_else(|e| e.into_inner());
+        *n -= 1;
+        if *n == 0 {
+            self.idle.notify_all();
+        }
+        out
+    }
+
+    /// Embeds for the indexer, one caller at a time, after any running searches.
+    pub fn background(&self, inputs: &[EmbedInput]) -> Result<Vec<Vec<f32>>> {
+        let _turn = self.background.lock().unwrap_or_else(|e| e.into_inner());
+        let mut n = self.queries.lock().unwrap_or_else(|e| e.into_inner());
+        while *n > 0 {
+            n = self.idle.wait(n).unwrap_or_else(|e| e.into_inner());
+        }
+        drop(n);
+        self.inner.embed(inputs)
+    }
 }
 
 /// A deterministic stand-in for tests and model-less runs.
@@ -283,6 +397,25 @@ mod tests {
         truncate_normalize(&mut v, 128);
         assert_eq!(v.len(), 128);
         assert!((dot(&v, &v) - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn simd_dot_matches_portable() {
+        let e = FakeEmbedder::new(771);
+        let a = one(&e, EmbedInput::Query("alpha".into()));
+        let b = one(&e, EmbedInput::Query("beta gamma".into()));
+        for n in [0, 1, 7, 8, 31, 32, 33, 768, 771] {
+            let (x, y) = (&a[..n], &b[..n]);
+            assert!((dot(x, y) - dot_portable(x, y)).abs() < 1e-5, "n={n}");
+        }
+    }
+
+    #[test]
+    fn embed_queue_serves_both_kinds() {
+        let q = EmbedQueue::new(std::sync::Arc::new(FakeEmbedder::new(8)));
+        let a = q.query(&[EmbedInput::Query("x".into())]).unwrap();
+        let b = q.background(&[EmbedInput::Query("x".into())]).unwrap();
+        assert_eq!(a, b);
     }
 
     #[test]

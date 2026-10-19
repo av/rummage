@@ -167,6 +167,19 @@ pub struct Segment {
     pub text: Option<String>,
     /// Similarity to the query, when there is one.
     pub score: Option<f32>,
+    /// In search results: `text` cut into pieces, with the pieces that match the query's
+    /// words marked `hit`. Joined, the pieces equal `text`. Empty when there is no text.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub snippet: Vec<TextSpan>,
+}
+
+/// A piece of a snippet.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct TextSpan {
+    pub text: String,
+    /// True when this piece matches a word of the query.
+    #[serde(default)]
+    pub hit: bool,
 }
 
 /// Filters applied to a search.
@@ -309,6 +322,9 @@ pub struct IndexCounts {
     pub indexed: u64,
     pub pending: u64,
     pub errors: u64,
+    /// Files that can't be indexed here (e.g. videos without ffmpeg).
+    #[serde(default)]
+    pub skipped: u64,
     pub bytes: u64,
     pub chunks: u64,
     pub vectors: u64,
@@ -321,6 +337,7 @@ impl From<crate::store::Counts> for IndexCounts {
             indexed: c.indexed,
             pending: c.pending,
             errors: c.errors,
+            skipped: c.skipped,
             bytes: c.bytes,
             chunks: c.chunks,
             vectors: c.vectors,
@@ -353,6 +370,9 @@ pub struct IndexStatus {
     pub files_per_min: Option<f64>,
     /// Estimated seconds until the queue is empty.
     pub eta_secs: Option<u64>,
+    /// Things the user should know, e.g. that ffmpeg is missing so videos are skipped.
+    #[serde(default)]
+    pub messages: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
@@ -366,6 +386,12 @@ pub struct FolderProgress {
     pub id: String,
     pub path: String,
     pub counts: IndexCounts,
+    /// True while the folder is being walked for new and changed files.
+    #[serde(default)]
+    pub scanning: bool,
+    /// Estimated seconds until this folder's waiting files are indexed, from the measured rate.
+    #[serde(default)]
+    pub eta_secs: Option<u64>,
 }
 
 /// One message on the `/index/events` stream (the SSE `event:` name is the `type`).
@@ -398,14 +424,44 @@ impl IndexEvent {
 #[serde(tag = "scope", rename_all = "lowercase")]
 pub enum ReindexRequest {
     All,
-    Folder { id: String },
-    Item { id: i64 },
+    Folder {
+        id: String,
+    },
+    Item {
+        id: i64,
+    },
+    /// Every file that failed or was skipped.
+    Problems,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct ReindexResponse {
     /// Files queued.
     pub queued: u64,
+}
+
+/// What to re-scan for new, changed, moved and deleted files.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, ToSchema)]
+#[serde(default)]
+pub struct ScanRequest {
+    /// A folder id or path; empty scans every enabled folder.
+    pub folder: Option<String>,
+}
+
+/// Files that failed to index or were skipped, newest first.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct ProblemList {
+    pub total: u64,
+    pub items: Vec<Item>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, IntoParams)]
+#[serde(default)]
+#[into_params(parameter_in = Query)]
+pub struct PageParams {
+    /// Default 50, at most 500.
+    pub limit: Option<u32>,
+    pub offset: u32,
 }
 
 /// The settings (same keys as the config file), where they come from, and what needs a restart.
@@ -523,6 +579,8 @@ pub struct ItemParams {
 pub struct ThumbParams {
     /// Longest edge in pixels; defaults to `index.thumbnail_size`.
     pub size: Option<u32>,
+    /// For video: the poster of the window that holds this second.
+    pub t: Option<f64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, IntoParams)]

@@ -22,6 +22,8 @@ use utoipa::{Modify, OpenApi, ToSchema};
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
+use crate::extract::render;
+
 /// Largest request body accepted (search-by-file uploads).
 const MAX_UPLOAD: usize = 64 * 1024 * 1024;
 
@@ -107,6 +109,10 @@ pub fn api_router() -> OpenApiRouter<Arc<AppState>> {
         .routes(routes!(get_folder, update_folder, remove_folder))
         .routes(routes!(index_status))
         .routes(routes!(index_events))
+        .routes(routes!(index_problems))
+        .routes(routes!(index_scan))
+        .routes(routes!(index_pause))
+        .routes(routes!(index_resume))
         .routes(routes!(reindex))
         .routes(routes!(search))
         .routes(routes!(get_item))
@@ -362,7 +368,53 @@ async fn index_events(
     Ok(Sse::new(events).keep_alive(KeepAlive::default()))
 }
 
-/// Queues everything, one folder, or one item for re-indexing.
+/// Files that failed to index or were skipped, with the reason, newest first.
+#[utoipa::path(get, path = "/index/problems", tag = "index", params(PageParams),
+    responses((status = 200, body = ProblemList)))]
+async fn index_problems(
+    State(st): State<Arc<AppState>>,
+    Extension(Prefix(prefix)): Extension<Prefix>,
+    Query(p): Query<PageParams>,
+) -> ApiResult<Json<ProblemList>> {
+    let svc = st.svc.clone();
+    Ok(Json(blocking(move || svc.problems(&p, &prefix)).await?))
+}
+
+/// Walks one folder (or all) for new, changed, moved and deleted files now, instead of
+/// waiting for the periodic rescan.
+#[utoipa::path(post, path = "/index/scan", tag = "index", request_body = ScanRequest,
+    responses(
+        (status = 202, description = "Scan started"),
+        (status = 404, body = ApiError),
+        (status = 409, body = ApiError, description = "No indexer runs in this process"),
+    ))]
+async fn index_scan(
+    State(st): State<Arc<AppState>>,
+    body: Option<Json<ScanRequest>>,
+) -> ApiResult<StatusCode> {
+    let svc = st.svc.clone();
+    let req = body.map(|Json(b)| b).unwrap_or_default();
+    blocking(move || svc.scan(&req)).await?;
+    Ok(StatusCode::ACCEPTED)
+}
+
+/// Pauses indexing; searches keep working. Files in progress finish first.
+#[utoipa::path(post, path = "/index/pause", tag = "index",
+    responses((status = 200, body = IndexStatus)))]
+async fn index_pause(State(st): State<Arc<AppState>>) -> ApiResult<Json<IndexStatus>> {
+    let svc = st.svc.clone();
+    Ok(Json(blocking(move || svc.pause()).await?))
+}
+
+/// Resumes indexing.
+#[utoipa::path(post, path = "/index/resume", tag = "index",
+    responses((status = 200, body = IndexStatus)))]
+async fn index_resume(State(st): State<Arc<AppState>>) -> ApiResult<Json<IndexStatus>> {
+    let svc = st.svc.clone();
+    Ok(Json(blocking(move || svc.resume()).await?))
+}
+
+/// Queues everything, one folder, one item, or every failed or skipped file for re-indexing.
 #[utoipa::path(post, path = "/reindex", tag = "index", request_body = ReindexRequest,
     responses((status = 202, body = ReindexResponse), (status = 404, body = ApiError)))]
 async fn reindex(
@@ -458,11 +510,12 @@ async fn get_item(
     ))
 }
 
-/// A small JPEG of the item.
+/// A small WebP of the item: the picture, the first page, a video poster (`?t=` picks the
+/// window) or an audio waveform.
 #[utoipa::path(get, path = "/items/{id}/thumb", tag = "items",
     params(("id" = i64, Path, description = "Item id"), ThumbParams),
     responses(
-        (status = 200, content_type = "image/jpeg", body = Vec<u8>),
+        (status = 200, content_type = "image/webp", body = Vec<u8>),
         (status = 404, body = ApiError, description = "No such item, or no thumbnail yet"),
     ))]
 async fn item_thumb(
@@ -471,17 +524,19 @@ async fn item_thumb(
     Query(p): Query<ThumbParams>,
     req: Request,
 ) -> ApiResult<Response> {
-    let size = p.size.unwrap_or(st.svc.config().index.thumbnail_size);
-    let cached = st.svc.cache_path("thumbs", id, &size.to_string());
-    cached_or_image(&st, id, cached, req).await
+    let svc = st.svc.clone();
+    let size = p.size.unwrap_or(svc.config().index.thumbnail_size);
+    let render = blocking(move || render::thumbnail(&svc, id, size, p.t)).await?;
+    send_render(&st, id, render, req).await
 }
 
-/// A rendered view of the item: a document page or a video frame (images return themselves).
+/// A larger view of the item: a document page (`?page=`, from 1) or a video frame (`?t=`
+/// seconds), rendered on first request and cached. Images return themselves.
 #[utoipa::path(get, path = "/items/{id}/preview", tag = "items",
     params(("id" = i64, Path, description = "Item id"), PreviewParams),
     responses(
-        (status = 200, content_type = "image/jpeg", body = Vec<u8>),
-        (status = 404, body = ApiError, description = "No such item, or no preview yet"),
+        (status = 200, content_type = "image/webp", body = Vec<u8>),
+        (status = 404, body = ApiError, description = "No such item, or it has no preview"),
     ))]
 async fn item_preview(
     State(st): State<Arc<AppState>>,
@@ -489,33 +544,21 @@ async fn item_preview(
     Query(p): Query<PreviewParams>,
     req: Request,
 ) -> ApiResult<Response> {
-    let variant = match (p.page, p.t) {
-        (Some(page), _) => format!("p{page}"),
-        (None, Some(t)) => format!("t{}", t.max(0.0).floor() as u64),
-        (None, None) => "p1".into(),
-    };
-    let cached = st.svc.cache_path("previews", id, &variant);
-    cached_or_image(&st, id, cached, req).await
+    let svc = st.svc.clone();
+    let render = blocking(move || render::preview(&svc, id, p.page, p.t)).await?;
+    send_render(&st, id, render, req).await
 }
 
-/// Serves a cached rendering if there is one, else the original when it is an image.
-async fn cached_or_image(
+async fn send_render(
     st: &Arc<AppState>,
     id: i64,
-    cached: std::path::PathBuf,
+    render: render::Render,
     req: Request,
 ) -> ApiResult<Response> {
-    if tokio::fs::metadata(&cached).await.is_ok() {
-        return serve_file(cached, "image/jpeg", req).await;
+    match render {
+        render::Render::File(path) => serve_file(path, "image/webp", req).await,
+        render::Render::Original => item_raw(State(st.clone()), Path(id), req).await,
     }
-    let svc = st.svc.clone();
-    let kind = blocking(move || svc.item_kind(id)).await?;
-    if kind == Kind::Image {
-        return item_raw(State(st.clone()), Path(id), req).await;
-    }
-    Err(ApiErr(service::Error::NotFound(format!(
-        "no rendering of item {id} yet"
-    ))))
 }
 
 /// The file itself, with HTTP range support for seeking in audio and video.
@@ -601,18 +644,13 @@ async fn item_similar(
 async fn item_waveform(
     State(st): State<Arc<AppState>>,
     Path(id): Path<i64>,
-    Query(_p): Query<WaveformParams>,
+    Query(p): Query<WaveformParams>,
 ) -> ApiResult<Json<Waveform>> {
     let svc = st.svc.clone();
-    let kind = blocking(move || svc.item_kind(id)).await?;
-    if !matches!(kind, Kind::Audio | Kind::Video) {
-        return Err(ApiErr(service::Error::Unsupported(format!(
-            "item {id} is not audio or video"
-        ))));
-    }
-    Err(ApiErr(service::Error::NotFound(format!(
-        "no waveform of item {id} yet"
-    ))))
+    let points = p.points.unwrap_or(200);
+    Ok(Json(
+        blocking(move || render::waveform(&svc, id, points)).await?,
+    ))
 }
 
 /// Sub-directories of a directory on the server, for picking a folder to index.
