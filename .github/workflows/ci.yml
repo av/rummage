@@ -27,6 +27,8 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      # build.rs builds the web UI with bun.
+      - uses: oven-sh/setup-bun@v2
       - name: Install ffmpeg (video item of the parity test)
         run: sudo apt-get update -q && sudo apt-get install -y -q --no-install-recommends ffmpeg
       - name: Cache model files
@@ -37,3 +39,43 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --features rummage/cpu --locked -- -D warnings
       - run: cargo test --workspace --features rummage/cpu --locked
+
+  ui:
+    name: web UI (check, build, Playwright)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: crates/rummage/ui
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: true
+      - uses: oven-sh/setup-bun@v2
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: bun install --frozen-lockfile
+      - run: bun run check
+      - run: bun run build
+      - run: bun run size
+      - run: cargo build -p rummage --features rummage/cpu --locked
+      # Additive API changes pass; changes that break the UI or the mock fail here.
+      # (`bun run gen:api` with SPEC=<openapi.json> refreshes the committed types.)
+      - name: UI still type-checks against the server's OpenAPI description
+        run: |
+          dir=$(mktemp -d)
+          printf 'data_dir = "%s/data"\n' "$dir" > "$dir/config.toml"
+          RUMMAGE_CONFIG="$dir/config.toml" ../../../target/debug/rummage serve --bind 127.0.0.1:4190 &
+          for _ in $(seq 50); do curl -sf http://127.0.0.1:4190/api/openapi.json -o "$dir/openapi.json" && break; sleep 0.2; done
+          kill %1
+          SPEC="$dir/openapi.json" bun run gen:api
+          bun run check
+      - run: bunx playwright install --with-deps chromium
+      - run: bunx playwright test
+        env:
+          RUMMAGE_BIN: ${{ github.workspace }}/target/debug/rummage
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-report
+          path: crates/rummage/ui/playwright-report
+          retention-days: 7

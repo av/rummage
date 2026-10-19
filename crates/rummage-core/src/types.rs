@@ -235,6 +235,10 @@ pub struct SearchResponse {
     pub offset: u32,
     pub limit: u32,
     pub took_ms: f64,
+    /// Matching items per kind, ignoring the `types` filter (for filter chips; capped like
+    /// `total`).
+    #[serde(default)]
+    pub kinds: Vec<KindCount>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
@@ -434,6 +438,52 @@ pub struct Health {
     pub uptime_secs: u64,
     /// Whether API calls need a bearer token.
     pub auth_required: bool,
+}
+
+/// The loudness outline of an audio or video file, for drawing a waveform.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct Waveform {
+    /// Length of the file in seconds.
+    pub duration: f64,
+    /// Peak levels from 0 to 1, evenly spaced over `duration`.
+    pub peaks: Vec<f32>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, IntoParams)]
+#[serde(default)]
+#[into_params(parameter_in = Query)]
+pub struct WaveformParams {
+    /// Number of peaks, default 200, at most 2000.
+    pub points: Option<u32>,
+}
+
+/// Sub-folders of a directory on the server, for picking a folder to index.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct DirListing {
+    /// The directory listed (absolute).
+    pub path: String,
+    /// Its parent, if it has one.
+    pub parent: Option<String>,
+    /// Sub-directories, by name.
+    pub dirs: Vec<DirEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct DirEntry {
+    pub name: String,
+    pub path: String,
+    /// Whether this directory is already an indexed folder.
+    pub watched: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, IntoParams)]
+#[serde(default)]
+#[into_params(parameter_in = Query)]
+pub struct DirParams {
+    /// Absolute directory to list (`~` is expanded); default is the server user's home.
+    pub path: Option<String>,
+    /// Include hidden (dot) directories.
+    pub hidden: bool,
 }
 
 /// Every error response.

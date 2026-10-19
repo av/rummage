@@ -24,6 +24,7 @@ pub struct Config {
     pub model: ModelConfig,
     pub engine: EngineConfig,
     pub index: IndexConfig,
+    pub ui: UiConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
@@ -133,6 +134,14 @@ pub struct IndexConfig {
     pub skip: Vec<String>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, ToSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct UiConfig {
+    /// Link for "Open in Files" in the web UI, e.g. `/files/files{path}`. `{path}` is the
+    /// file's absolute path, `{dir}` its folder. Empty hides the action.
+    pub files_url: String,
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -142,6 +151,7 @@ impl Default for Config {
             model: ModelConfig::default(),
             engine: EngineConfig::default(),
             index: IndexConfig::default(),
+            ui: UiConfig::default(),
         }
     }
 }
@@ -222,6 +232,7 @@ pub const ENV_OVERRIDES: &[(&str, &str)] = &[
     ("RUMMAGE_SCAN_INTERVAL", "index.scan_interval_secs"),
     ("RUMMAGE_THUMB_SIZE", "index.thumbnail_size"),
     ("RUMMAGE_SKIP", "index.skip"),
+    ("RUMMAGE_FILES_URL", "ui.files_url"),
 ];
 
 /// Keys that only take effect after a restart of `rummage serve`.

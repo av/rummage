@@ -71,6 +71,14 @@ pub fn folder_id(path: &str) -> String {
     format!("{:012x}", fnv1a(path.as_bytes()) >> 16)
 }
 
+/// A ranked candidate file.
+struct Fused {
+    score: f32,
+    chunk: i64,
+    similarity: Option<f32>,
+    keyword: bool,
+}
+
 /// All vectors, kept in memory for an exact scan.
 struct VectorCache {
     fingerprint: (i64, i64),
@@ -265,6 +273,42 @@ impl Service {
         self.store.delete_folder(&target.path)?;
         self.publish_status();
         Ok(())
+    }
+
+    /// Sub-directories of `path` (default: the home directory), for picking a folder.
+    pub fn list_dirs(&self, path: Option<&str>, hidden: bool) -> Result<DirListing> {
+        let raw = path.map(str::trim).filter(|p| !p.is_empty()).unwrap_or("~");
+        let path = expand_home(raw);
+        if !path.is_absolute() {
+            return Err(Error::BadRequest(format!("path must be absolute: {raw}")));
+        }
+        let path = std::fs::canonicalize(&path)
+            .map_err(|e| Error::NotFound(format!("{}: {e}", path.display())))?;
+        let entries = std::fs::read_dir(&path)
+            .map_err(|e| Error::BadRequest(format!("can't read {}: {e}", path.display())))?;
+        let watched: HashSet<String> = self.folders()?.into_iter().map(|f| f.path).collect();
+        let mut dirs: Vec<DirEntry> = entries
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().is_dir())
+            .filter_map(|e| {
+                let name = e.file_name().to_string_lossy().into_owned();
+                if !hidden && name.starts_with('.') {
+                    return None;
+                }
+                let p = e.path().to_string_lossy().into_owned();
+                Some(DirEntry {
+                    watched: watched.contains(&p),
+                    name,
+                    path: p,
+                })
+            })
+            .collect();
+        dirs.sort_by_key(|d| d.name.to_lowercase());
+        Ok(DirListing {
+            path: path.to_string_lossy().into_owned(),
+            parent: path.parent().map(|p| p.to_string_lossy().into_owned()),
+            dirs,
+        })
     }
 
     // ---- index ----
@@ -601,90 +645,17 @@ impl Service {
     ) -> Result<SearchResponse> {
         let started = Instant::now();
         let limit = req.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
-        let want = (req.offset + limit) as usize;
-        let pool = (want * 4).max(200);
-        let allowed = self.allowed_files(&req.filters)?;
-        let ok = |file_id: i64| {
-            Some(file_id) != exclude && allowed.as_ref().is_none_or(|a| a.contains(&file_id))
-        };
-
-        // Best chunk per file from the vector scan, ranked.
-        let mut vector_hits: Vec<(i64, i64, f32)> = vec![];
-        if let Some(qv) = &qv
-            && req.mode != SearchMode::Keyword
-        {
-            let cache = self.vector_cache()?;
-            if cache.dim > 0 && cache.dim <= qv.len() {
-                let q = truncated(qv, cache.dim);
-                let mut best: HashMap<i64, (i64, f32)> = HashMap::new();
-                for (i, row) in cache.data.chunks_exact(cache.dim).enumerate() {
-                    let file_id = cache.file_ids[i];
-                    if !ok(file_id) {
-                        continue;
-                    }
-                    let s = dot(row, &q);
-                    let e = best.entry(file_id).or_insert((cache.chunk_ids[i], s));
-                    if s > e.1 {
-                        *e = (cache.chunk_ids[i], s);
-                    }
-                }
-                vector_hits = best.into_iter().map(|(f, (c, s))| (f, c, s)).collect();
-                vector_hits.sort_by(|a, b| b.2.total_cmp(&a.2));
-                vector_hits.truncate(pool);
-            }
-        }
-
-        // Best chunk per file from the keyword index, ranked.
-        let mut keyword_hits: Vec<(i64, i64)> = vec![];
-        if let Some(q) = req.query.as_deref()
-            && req.mode != SearchMode::Vector
-        {
-            let mut seen = HashSet::new();
-            for (chunk, file) in self.store.keyword_search(q, pool * 4)? {
-                if ok(file) && seen.insert(file) {
-                    keyword_hits.push((file, chunk));
-                }
-            }
-            keyword_hits.truncate(pool);
-        }
-
-        // Reciprocal-rank fusion.
-        struct Fused {
-            score: f32,
-            chunk: i64,
-            similarity: Option<f32>,
-            keyword: bool,
-        }
-        let mut fused: HashMap<i64, Fused> = HashMap::new();
-        for (rank, (file, chunk, sim)) in vector_hits.iter().enumerate() {
-            fused.insert(
-                *file,
-                Fused {
-                    score: 1.0 / (RRF_K + rank as f32 + 1.0),
-                    chunk: *chunk,
-                    similarity: Some(*sim),
-                    keyword: false,
-                },
-            );
-        }
-        for (rank, (file, chunk)) in keyword_hits.iter().enumerate() {
-            let s = 1.0 / (RRF_K + rank as f32 + 1.0);
-            fused
-                .entry(*file)
-                .and_modify(|f| {
-                    f.score += s;
-                    f.keyword = true;
-                })
-                .or_insert(Fused {
-                    score: s,
-                    chunk: *chunk,
-                    similarity: None,
-                    keyword: true,
-                });
-        }
-        let mut ranked: Vec<(i64, Fused)> = fused.into_iter().collect();
-        ranked.sort_by(|a, b| b.1.score.total_cmp(&a.1.score).then(a.0.cmp(&b.0)));
+        let ranked = self.rank(req, &req.filters, qv.as_deref(), exclude, limit)?;
         let total = ranked.len() as u64;
+        let kinds = if req.filters.types.is_empty() {
+            self.kind_counts(&ranked)?
+        } else {
+            let all_kinds = Filters {
+                types: vec![],
+                ..req.filters.clone()
+            };
+            self.kind_counts(&self.rank(req, &all_kinds, qv.as_deref(), exclude, limit)?)?
+        };
 
         let page: Vec<&(i64, Fused)> = ranked
             .iter()
@@ -725,7 +696,110 @@ impl Service {
             offset: req.offset,
             limit,
             took_ms: started.elapsed().as_secs_f64() * 1000.0,
+            kinds,
         })
+    }
+
+    /// Every candidate file passing `filters`, best first.
+    fn rank(
+        &self,
+        req: &SearchRequest,
+        filters: &Filters,
+        qv: Option<&[f32]>,
+        exclude: Option<i64>,
+        limit: u32,
+    ) -> Result<Vec<(i64, Fused)>> {
+        let want = (req.offset + limit) as usize;
+        let pool = (want * 4).max(200);
+        let allowed = self.allowed_files(filters)?;
+        let ok = |file_id: i64| {
+            Some(file_id) != exclude && allowed.as_ref().is_none_or(|a| a.contains(&file_id))
+        };
+
+        // Best chunk per file from the vector scan, ranked.
+        let mut vector_hits: Vec<(i64, i64, f32)> = vec![];
+        if let Some(qv) = qv
+            && req.mode != SearchMode::Keyword
+        {
+            let cache = self.vector_cache()?;
+            if cache.dim > 0 && cache.dim <= qv.len() {
+                let q = truncated(qv, cache.dim);
+                let mut best: HashMap<i64, (i64, f32)> = HashMap::new();
+                for (i, row) in cache.data.chunks_exact(cache.dim).enumerate() {
+                    let file_id = cache.file_ids[i];
+                    if !ok(file_id) {
+                        continue;
+                    }
+                    let s = dot(row, &q);
+                    let e = best.entry(file_id).or_insert((cache.chunk_ids[i], s));
+                    if s > e.1 {
+                        *e = (cache.chunk_ids[i], s);
+                    }
+                }
+                vector_hits = best.into_iter().map(|(f, (c, s))| (f, c, s)).collect();
+                vector_hits.sort_by(|a, b| b.2.total_cmp(&a.2));
+                vector_hits.truncate(pool);
+            }
+        }
+
+        // Best chunk per file from the keyword index, ranked.
+        let mut keyword_hits: Vec<(i64, i64)> = vec![];
+        if let Some(q) = req.query.as_deref()
+            && req.mode != SearchMode::Vector
+        {
+            let mut seen = HashSet::new();
+            for (chunk, file) in self.store.keyword_search(q, pool * 4)? {
+                if ok(file) && seen.insert(file) {
+                    keyword_hits.push((file, chunk));
+                }
+            }
+            keyword_hits.truncate(pool);
+        }
+
+        // Reciprocal-rank fusion.
+        let mut fused: HashMap<i64, Fused> = HashMap::new();
+        for (rank, (file, chunk, sim)) in vector_hits.iter().enumerate() {
+            fused.insert(
+                *file,
+                Fused {
+                    score: 1.0 / (RRF_K + rank as f32 + 1.0),
+                    chunk: *chunk,
+                    similarity: Some(*sim),
+                    keyword: false,
+                },
+            );
+        }
+        for (rank, (file, chunk)) in keyword_hits.iter().enumerate() {
+            let s = 1.0 / (RRF_K + rank as f32 + 1.0);
+            fused
+                .entry(*file)
+                .and_modify(|f| {
+                    f.score += s;
+                    f.keyword = true;
+                })
+                .or_insert(Fused {
+                    score: s,
+                    chunk: *chunk,
+                    similarity: None,
+                    keyword: true,
+                });
+        }
+        let mut ranked: Vec<(i64, Fused)> = fused.into_iter().collect();
+        ranked.sort_by(|a, b| b.1.score.total_cmp(&a.1.score).then(a.0.cmp(&b.0)));
+        Ok(ranked)
+    }
+
+    /// How many of the ranked files are of each kind.
+    fn kind_counts(&self, ranked: &[(i64, Fused)]) -> Result<Vec<KindCount>> {
+        let ids: Vec<i64> = ranked.iter().map(|(id, _)| *id).collect();
+        let mut counts: HashMap<Kind, u64> = HashMap::new();
+        for f in self.store.files(&ids)? {
+            *counts.entry(f.kind).or_default() += 1;
+        }
+        Ok(Kind::ALL
+            .into_iter()
+            .filter_map(|kind| counts.get(&kind).map(|&files| KindCount { kind, files }))
+            .collect())
     }
 
     /// The file ids that pass `filters`, or `None` when nothing is filtered.

@@ -2,16 +2,22 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<meta name="theme-color" content="#f7f7f8" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0e1014" media="(prefers-color-scheme: dark)">
 <title>rummage</title>
-<style>
-  :root { color-scheme: light dark; }
-  body { font: 16px/1.5 system-ui, sans-serif; max-width: 40rem; margin: 15vh auto; padding: 0 1rem; }
-</style>
+<link rel="icon" href="./favicon.svg" type="image/svg+xml">
+<script>
+  try {
+    var t = localStorage.getItem('rummage.theme');
+    if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t;
+  } catch (e) {}
+</script>
 </head>
 <body>
-<h1>rummage</h1>
-<p>The search page is not built into this version yet.</p>
-<p>The API is at <a href="api/v1/health">api/v1</a>, described in <a href="api/docs">api/docs</a>.</p>
+<div id="app"></div>
+<noscript>rummage needs JavaScript for its search page. The API is at <a href="api/docs">api/docs</a>.</noscript>
+<script type="module" src="/src/main.ts"></script>
 </body>
 </html>

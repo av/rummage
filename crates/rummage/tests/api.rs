@@ -640,3 +640,41 @@ async fn cli_client_talks_to_a_live_server() {
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].item.name, "tax.md");
 }
+
+#[tokio::test]
+async fn kind_counts_dirs_and_waveform() {
+    let f = Fixture::new("");
+    let app = f.app();
+    // Counts per kind ignore the `types` filter, so chips can show every kind.
+    let (_, _, body) = call(
+        &app,
+        json_req(
+            Method::POST,
+            "/api/v1/search",
+            json!({ "query": "red bicycle", "mode": "vector", "filters": { "types": ["image"] } }),
+        ),
+    )
+    .await;
+    let r: SearchResponse = parse(&body);
+    assert!(r.hits.iter().all(|h| h.item.kind == Kind::Image));
+    let count = |k: Kind| r.kinds.iter().find(|c| c.kind == k).map_or(0, |c| c.files);
+    assert_eq!((count(Kind::Text), count(Kind::Image)), (2, 1));
+
+    let docs = f.dir.path().join("docs");
+    std::fs::create_dir_all(docs.join("sub")).unwrap();
+    std::fs::create_dir_all(docs.join(".hidden")).unwrap();
+    let uri = format!("/api/v1/fs/dirs?path={}", docs.display());
+    let (status, _, body) = call(&app, get(&uri)).await;
+    assert_eq!(status, StatusCode::OK);
+    let l: DirListing = parse(&body);
+    assert_eq!(l.dirs.len(), 1);
+    assert_eq!(l.dirs[0].name, "sub");
+    assert!(!l.dirs[0].watched);
+    let (_, _, body) = call(&app, get(&format!("{uri}&hidden=true"))).await;
+    assert_eq!(parse::<DirListing>(&body).dirs.len(), 2);
+    let (status, _, _) = call(&app, get("/api/v1/fs/dirs?path=relative")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let (status, _, _) = call(&app, get(&format!("/api/v1/items/{}/waveform", f.ids[0]))).await;
+    assert_eq!(status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+}

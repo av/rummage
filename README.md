@@ -5,8 +5,8 @@ watches the folders you choose, and indexes text, images, documents, audio and v
 Google DeepMind's [EmbeddingGemma 2](https://huggingface.co/google/embeddinggemma-2), running
 on llama.cpp with CUDA, ROCm, Vulkan or CPU.
 
-Work in progress: the program, config, CLI and API are in place; the embedding engine,
-the indexer and the web UI are being built. Until the engine lands, every build uses a
+Work in progress: the program, config, CLI, API and web UI are in place; the embedding engine
+and the indexer are being built. Until the engine lands, every build uses a
 deterministic stand-in embedder, so results are not meaningful yet.
 
 ## Quickstart
@@ -30,6 +30,26 @@ proxy strips it, so links in responses and the UI always carry the right prefix.
 
 The CLI talks to a running server when it finds one (at `server.bind`, or `--server URL`) and
 opens the index directly otherwise (`--local` forces that).
+
+## The web page
+
+`rummage serve` serves a search page at `/` (or under `--base-path`). Type to search; results
+come as you type, and a click (or Enter) opens a preview beside them: photos with zoom and EXIF,
+video and audio from the matching moment, PDFs at the matching page, text at the matching passage.
+
+- `/` jumps to the search box from anywhere; Enter opens the top result.
+- Arrow keys move through results; in the preview, Left/Right go to the previous/next result and
+  Esc closes it.
+- Drop or paste an image, audio or text file anywhere to search by it; "More like this" does the
+  same for any result.
+- The URL holds the search (`?q=&type=&folder=&date=&in=&like=&item=`), so links and Back/Forward
+  work, and other pages can link straight to results or to an open item.
+- The folder icon opens the folders drawer: add folders (paste a path or browse the server),
+  pause, exclude, reindex, and see progress live. On first run it opens by itself.
+
+![Results and preview](docs/screenshots/desktop-dark-preview.png)
+
+More in [docs/screenshots](docs/screenshots).
 
 ## Config reference
 
@@ -59,6 +79,7 @@ defaults below. The same keys are readable and writable with `rummage config get
 | `index.scan_interval_secs` | `3600` | `RUMMAGE_SCAN_INTERVAL` | Full re-scan period (file watching covers the rest); 0 disables |
 | `index.thumbnail_size` | `320` | `RUMMAGE_THUMB_SIZE` | Longest thumbnail edge in pixels |
 | `index.skip` | `node_modules, .git, target, dist, .cache, __pycache__, .venv` | `RUMMAGE_SKIP` (comma list) | Directory names skipped everywhere |
+| `ui.files_url` | `""` | `RUMMAGE_FILES_URL` | Link for "Open in Files" in the web UI, e.g. `/files/files{path}`; `{path}` is the file's absolute path, `{dir}` its folder. Empty hides it |
 
 Each `[[folders]]` entry has `path`, `include` and `exclude` (globs relative to the folder;
 an empty `include` means everything) and `enabled`:
@@ -105,6 +126,7 @@ Everything the UI does goes through `/api/v1`. The OpenAPI description is at
 | `GET /api/v1/health` | Liveness, version, embedder (never needs a token) |
 | `GET /api/v1/folders`, `POST /api/v1/folders` | List, add folders |
 | `GET\|PATCH\|DELETE /api/v1/folders/{id}` | One folder: read, change globs or `enabled`, remove |
+| `GET /api/v1/fs/dirs` | Sub-directories of a server directory (`?path=`, `?hidden=true`), for picking folders |
 | `GET /api/v1/index/status` | Totals, per kind, per folder, queue |
 | `GET /api/v1/index/events` | Live progress (server-sent events) |
 | `POST /api/v1/reindex` | `{"scope":"all"}`, `{"scope":"folder","id":…}` or `{"scope":"item","id":…}` |
@@ -114,6 +136,7 @@ Everything the UI does goes through `/api/v1`. The OpenAPI description is at
 | `GET /api/v1/items/{id}/preview` | A document page (`?page=`) or a video frame (`?t=`) |
 | `GET /api/v1/items/{id}/raw` | The file, with range requests for audio/video seeking |
 | `GET /api/v1/items/{id}/similar` | More like this (`?type=image,video&limit=`) |
+| `GET /api/v1/items/{id}/waveform` | Peak levels of an audio or video file (`?points=`), for drawing a waveform |
 | `GET\|PATCH /api/v1/settings` | The config keys; PATCH takes a JSON merge patch |
 
 Errors are `{"error": "<code>", "message": "…"}` with codes `bad_request`, `unauthorized`,
@@ -125,6 +148,26 @@ Errors are `{"error": "<code>", "message": "…"}` with codes `bad_request`, `un
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
+```
+
+### Web UI
+
+The page is a Svelte 5 + Vite app in `crates/rummage/ui`, using only the public API. `cargo build`
+builds it with [bun](https://bun.sh) (see `crates/rummage/build.rs`) and embeds it in the binary.
+Without bun the binary gets a placeholder page; `RUMMAGE_UI_DIST=<dir>` embeds a UI built
+elsewhere, and `RUMMAGE_SKIP_UI=1` skips it.
+
+```sh
+cd crates/rummage/ui
+bun install
+bun run build && bun run mock      # a mock API with 10k items at http://127.0.0.1:4173/search/
+RUMMAGE_API=http://127.0.0.1:4173 bun run dev   # Vite dev server against the mock (or a real server)
+bun run check                      # svelte-check and TypeScript
+bunx playwright install chromium
+bunx playwright test               # end-to-end tests against mock servers
+RUMMAGE_BIN=../../../target/debug/rummage bunx playwright test   # plus the real binary
+bun run screenshots                # refresh docs/screenshots
+SPEC=openapi.json bun run gen:api  # refresh src/lib/api-types.ts from /api/openapi.json
 ```
 
 Crates: `crates/rummage` (the binary: CLI, server, embedded UI), `crates/rummage-core`

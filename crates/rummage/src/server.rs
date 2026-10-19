@@ -114,6 +114,8 @@ pub fn api_router() -> OpenApiRouter<Arc<AppState>> {
         .routes(routes!(item_preview))
         .routes(routes!(item_raw))
         .routes(routes!(item_similar))
+        .routes(routes!(item_waveform))
+        .routes(routes!(list_dirs))
         .routes(routes!(get_settings, patch_settings));
     OpenApiRouter::with_openapi(ApiDoc::openapi()).nest("/api/v1", v1)
 }
@@ -588,6 +590,49 @@ async fn item_similar(
     Ok(Json(blocking(move || svc.similar(id, &p, &prefix)).await?))
 }
 
+/// Peak levels of an audio or video file's sound, for drawing a waveform.
+#[utoipa::path(get, path = "/items/{id}/waveform", tag = "items",
+    params(("id" = i64, Path, description = "Item id"), WaveformParams),
+    responses(
+        (status = 200, body = Waveform),
+        (status = 404, body = ApiError, description = "No such item, or no waveform yet"),
+        (status = 415, body = ApiError, description = "The item has no sound"),
+    ))]
+async fn item_waveform(
+    State(st): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+    Query(_p): Query<WaveformParams>,
+) -> ApiResult<Json<Waveform>> {
+    let svc = st.svc.clone();
+    let kind = blocking(move || svc.item_kind(id)).await?;
+    if !matches!(kind, Kind::Audio | Kind::Video) {
+        return Err(ApiErr(service::Error::Unsupported(format!(
+            "item {id} is not audio or video"
+        ))));
+    }
+    Err(ApiErr(service::Error::NotFound(format!(
+        "no waveform of item {id} yet"
+    ))))
+}
+
+/// Sub-directories of a directory on the server, for picking a folder to index.
+#[utoipa::path(get, path = "/fs/dirs", tag = "folders",
+    params(DirParams),
+    responses(
+        (status = 200, body = DirListing),
+        (status = 400, body = ApiError, description = "Not absolute, or not readable"),
+        (status = 404, body = ApiError, description = "No such directory"),
+    ))]
+async fn list_dirs(
+    State(st): State<Arc<AppState>>,
+    Query(p): Query<DirParams>,
+) -> ApiResult<Json<DirListing>> {
+    let svc = st.svc.clone();
+    Ok(Json(
+        blocking(move || svc.list_dirs(p.path.as_deref(), p.hidden)).await?,
+    ))
+}
+
 /// The settings: the config file's keys, with environment overrides applied.
 #[utoipa::path(get, path = "/settings", tag = "settings",
     responses((status = 200, body = SettingsView)))]
@@ -628,7 +673,7 @@ async fn docs() -> Html<&'static str> {
 }
 
 #[derive(rust_embed::Embed)]
-#[folder = "ui/"]
+#[folder = "$RUMMAGE_UI_DIR"]
 struct Ui;
 
 /// Serves the embedded UI; unknown paths get `index.html` so client-side routes work.
