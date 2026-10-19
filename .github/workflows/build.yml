@@ -127,5 +127,5 @@ jobs:
             docker tag rummage-ci:$BACKEND $IMAGE:$tag
             docker push -q $IMAGE:$tag
           done
-          digest=$(docker inspect -f '{{index .RepoDigests 0}}' $IMAGE:$VERSION-$BACKEND)
+          digest=$(docker inspect -f '{{range .RepoDigests}}{{println .}}{{end}}' $IMAGE:$VERSION-$BACKEND | grep "^$IMAGE@")
           echo "$IMAGE:$VERSION-$BACKEND $digest" | tee "$DIST/image-$BACKEND.txt"
