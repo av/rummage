@@ -533,7 +533,8 @@ async fn item_thumb(
 }
 
 /// A larger view of the item: a document page (`?page=`, from 1) or a video frame (`?t=`
-/// seconds), rendered on first request and cached. Images return themselves.
+/// seconds), rendered on first request and cached. Images: the file itself when a browser can
+/// show it and it is at most 2048 px, else an upright WebP scaled to fit 2048 px.
 #[utoipa::path(get, path = "/items/{id}/preview", tag = "items",
     params(("id" = i64, Path, description = "Item id"), PreviewParams),
     responses(

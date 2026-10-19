@@ -11,6 +11,13 @@
   let ox = $state(50);
   let oy = $state(50);
   let frame = $state<HTMLDivElement>();
+  /** The picture's upright shape (stored by the indexer), so a portrait photo gets a tall frame. */
+  const ratio = $derived.by(() => {
+    const exif = item.exif as Record<string, unknown> | null | undefined;
+    const w = Number(exif?.width);
+    const h = Number(exif?.height);
+    return w > 0 && h > 0 ? `${w} / ${h}` : '4 / 3';
+  });
   let drag: { x: number; y: number; ox: number; oy: number; moved: boolean } | null = null;
 
   function toggle(e?: MouseEvent) {
@@ -58,6 +65,7 @@
     class="frame"
     class:zoomed
     bind:this={frame}
+    style:aspect-ratio={ratio}
     onpointerdown={down}
     onpointermove={move}
     onclick={click}
@@ -104,10 +112,10 @@
     cursor: grab;
     touch-action: none;
   }
+  /* Out of the flow, so the picture's own size can't stretch the frame (and get cropped). */
   .frame img {
-    grid-area: 1 / 1;
-    max-width: 100%;
-    max-height: 100%;
+    position: absolute;
+    inset: 0;
     width: 100%;
     height: 100%;
     object-fit: contain;

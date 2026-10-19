@@ -90,14 +90,45 @@ pub fn thumbnail(svc: &Service, id: i64, size: u32, t: Option<f64>) -> Result<Re
     }
 }
 
+/// Longest edge of an image's preview.
+pub const PREVIEW_SIZE: u32 = 2048;
+
+/// Image files every browser shows as they are (and turns upright from their EXIF).
+const BROWSER_IMAGE_EXT: &[&str] = &["jpg", "jpeg", "jpe", "png", "webp", "gif", "bmp"];
+
+/// An image's preview: the file itself when a browser can show it and it is at most
+/// [`PREVIEW_SIZE`] (always for GIFs, which may move), else an upright WebP scaled to fit.
+fn image_preview(path: &Path, cached: &Path) -> Result<Render> {
+    let e = super::ext(path);
+    let small = BROWSER_IMAGE_EXT.contains(&e.as_str())
+        && ::image::image_dimensions(path).is_ok_and(|(w, h)| w.max(h) <= PREVIEW_SIZE);
+    if small || e == "gif" {
+        return Ok(Render::Original);
+    }
+    if cached.exists() {
+        return Ok(Render::File(cached.to_path_buf()));
+    }
+    Ok(match image::load(path, Tools::cached().ffmpeg) {
+        Ok(img) => {
+            save(cached, &thumb::thumbnail(&img, PREVIEW_SIZE))?;
+            Render::File(cached.to_path_buf())
+        }
+        Err(_) => Render::Original,
+    })
+}
+
 type Renderer = Box<dyn Fn(&Path) -> anyhow::Result<Vec<u8>>>;
 
-/// A document page (1-based) or a video frame at `t` seconds; images are their own preview.
+/// A document page (1-based), a video frame at `t` seconds, or an image fit for a browser.
 pub fn preview(svc: &Service, id: i64, page: Option<u32>, t: Option<f64>) -> Result<Render> {
     let kind = svc.item_kind(id)?;
     let tools = Tools::cached();
     let (variant, make): (String, Renderer) = match kind {
-        Kind::Image => return Ok(Render::Original),
+        Kind::Image => {
+            let (path, _) = svc.item_path(id)?;
+            let cached = svc.cache_path("thumbs", id, &PREVIEW_SIZE.to_string());
+            return image_preview(Path::new(&path), &cached);
+        }
         Kind::Doc if tools.pdftoppm => {
             let page = page.unwrap_or(1).max(1);
             (
@@ -132,4 +163,73 @@ pub fn preview(svc: &Service, id: i64, page: Option<u32>, t: Option<f64>) -> Res
         .map_err(|e| Error::NotFound(format!("can't render item {id}: {e:#}")))?;
     save(&cached, &bytes)?;
     Ok(Render::File(cached))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Cursor;
+
+    use ::image::{ImageFormat, Rgb, RgbImage};
+
+    use super::*;
+
+    /// A JPEG of `w` x `h` stored pixels, red down its left edge, tagged EXIF Orientation 6:
+    /// shown turned 90° clockwise, so the red edge is the top of the upright picture.
+    fn rotated_jpeg(w: u32, h: u32) -> Vec<u8> {
+        let img = RgbImage::from_fn(w, h, |x, _| {
+            if x < w / 10 {
+                Rgb([220, 30, 30])
+            } else {
+                Rgb([40, 90, 200])
+            }
+        });
+        let mut jpeg = Vec::new();
+        img.write_to(&mut Cursor::new(&mut jpeg), ImageFormat::Jpeg)
+            .unwrap();
+        // APP1 "Exif": a big-endian TIFF header and one IFD entry, Orientation (0x0112) = 6.
+        let tiff = [
+            b'M', b'M', 0, 42, 0, 0, 0, 8, 0, 1, 0x01, 0x12, 0, 3, 0, 0, 0, 1, 0, 6, 0, 0, 0, 0, 0,
+            0,
+        ];
+        let mut app1 = vec![0xFF, 0xE1];
+        app1.extend_from_slice(&((2 + 6 + tiff.len()) as u16).to_be_bytes());
+        app1.extend_from_slice(b"Exif\0\0");
+        app1.extend_from_slice(&tiff);
+        jpeg.splice(2..2, app1);
+        jpeg
+    }
+
+    #[test]
+    fn image_previews_are_upright_and_capped() {
+        let dir = tempfile::tempdir().unwrap();
+        let big = dir.path().join("portrait.jpg");
+        std::fs::write(&big, rotated_jpeg(2400, 1350)).unwrap();
+        let cached = dir.path().join("cache").join("2048.webp");
+        let Render::File(file) = image_preview(&big, &cached).unwrap() else {
+            panic!("a large photo gets a scaled preview");
+        };
+        assert_eq!(file, cached);
+        let img = ::image::open(&file).unwrap().to_rgb8();
+        assert_eq!(
+            img.dimensions(),
+            (1152, 2048),
+            "upright portrait, long edge capped"
+        );
+        let top = img.get_pixel(576, 30);
+        assert!(top[0] > 150 && top[2] < 100, "red edge on top: {top:?}");
+        assert!(matches!(
+            image_preview(&big, &cached).unwrap(),
+            Render::File(_)
+        ));
+
+        // Small files a browser can show (it turns them upright itself) are sent as they are.
+        let small = dir.path().join("small.jpg");
+        std::fs::write(&small, rotated_jpeg(400, 225)).unwrap();
+        let other = dir.path().join("small.webp");
+        assert!(matches!(
+            image_preview(&small, &other).unwrap(),
+            Render::Original
+        ));
+        assert!(!other.exists());
+    }
 }
