@@ -1,4 +1,4 @@
-# On a version tag: all four backends, images pushed to ghcr.io (private, like the repo), and a
+# On a version tag: all four backends, images pushed to ghcr.io, and a
 # GitHub pre-release with the tarballs and their SHA-256 sums. Runs on the fedora runner; the
 # build jobs leave their files in /mnt/models/rummage/ci/dist/<run id> for the release job.
 name: release
@@ -38,7 +38,7 @@ jobs:
             echo "| ROCm | rummage-$v-linux-x86_64-rocm.tar.gz | ROCm 7.x: HIP runtime, hipBLAS, rocBLAS |"
             echo "| CUDA | rummage-$v-linux-x86_64-cuda.tar.gz | NVIDIA driver 525+, cuBLAS 12 (libcublas.so.12, libcublasLt.so.12) |"
             echo
-            echo "Images (private, ghcr.io), \`docker pull <tag>\`:"
+            echo "Images (ghcr.io), \`docker pull <tag>\`:"
             echo
             echo '```'
             cat image-*.txt
