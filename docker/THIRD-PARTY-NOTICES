@@ -1,0 +1,63 @@
+rummage: local multimodal semantic search
+https://github.com/av/rummage
+
+rummage is licensed under the Apache License 2.0 (LICENSE). It includes or uses the third-party
+components below, under their own licences. The full list, with every Rust crate and web UI
+package, is docs/LICENSES-THIRD-PARTY.md in the source repository.
+
+In the rummage binary (statically linked):
+  - llama.cpp and ggml: MIT licence, text below. https://github.com/ggml-org/llama.cpp
+  - Rust crates listed in Cargo.lock, under MIT, Apache-2.0, BSD, ISC, Zlib, Unicode-3.0, CC0,
+    CDLA-Permissive-2.0 or MPL-2.0 (symphonia audio decoders, option-ext). MPL-2.0 source:
+    https://github.com/pdeljanov/Symphonia and https://crates.io/crates/option-ext
+  - SQLite (public domain, via rusqlite), libwebp (BSD-3-Clause, via libwebp-sys).
+  - The web UI: Svelte (MIT), Lucide icons (ISC), clsx (MIT).
+  - CUDA build only: the NVIDIA CUDA runtime (cudart_static), under the NVIDIA CUDA Toolkit
+    EULA, which allows redistributing it inside applications.
+    https://docs.nvidia.com/cuda/eula/
+
+Not included in the release archives (loaded from the system at run time): the Vulkan loader,
+ROCm (HIP runtime, hipBLAS, rocBLAS), cuBLAS, ffmpeg, pdftotext.
+
+The Docker images also contain, as separate programs and libraries installed from the
+distribution and vendor package repositories (each package's licence is in
+/usr/share/doc/<package>/copyright):
+  - Ubuntu 24.04 base system (mostly GPL, LGPL, MIT and BSD licensed packages).
+    Source: https://launchpad.net/ubuntu (apt-get source <package>).
+  - ffmpeg 6.1 from Ubuntu, built with --enable-gpl, so licensed GPL-2.0-or-later. rummage runs
+    it as a separate program and does not link it. Source: https://launchpad.net/ubuntu/+source/ffmpeg
+  - poppler-utils (pdftotext), GPL-2.0 or GPL-3.0, run as a separate program.
+    Source: https://launchpad.net/ubuntu/+source/poppler
+  - vulkan image: the Vulkan loader (Apache-2.0) and Mesa's Vulkan drivers (MIT).
+  - rocm image: AMD ROCm HIP runtime, hipBLAS, rocBLAS and their dependencies (MIT and other
+    permissive licences) from https://repo.radeon.com.
+  - cuda image: based on NVIDIA's nvidia/cuda base image, with cuBLAS, under the NVIDIA CUDA
+    Toolkit EULA (https://docs.nvidia.com/cuda/eula/). Using this image means accepting it.
+
+The EmbeddingGemma 2 model (google/embeddinggemma-2) is not included. rummage downloads its
+GGUF files on first use; the model is under Apache 2.0, and the Gemma prohibited use policy
+applies (https://ai.google.dev/gemma/prohibited_use_policy).
+
+---------------------------------------- llama.cpp and ggml
+
+MIT License
+
+Copyright (c) 2023-2026 The ggml authors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

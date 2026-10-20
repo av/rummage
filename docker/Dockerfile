@@ -125,13 +125,15 @@ ENV PATH=/opt/rocm/bin:$PATH LD_LIBRARY_PATH=/opt/rocm/lib
 FROM runtime-${BACKEND}
 ARG BACKEND
 LABEL org.opencontainers.image.source="https://github.com/av/rummage" \
-      org.opencontainers.image.description="rummage: local multimodal semantic search (${BACKEND} build)"
+      org.opencontainers.image.description="rummage: local multimodal semantic search (${BACKEND} build)" \
+      org.opencontainers.image.licenses="Apache-2.0"
 # Ubuntu images ship a user 1000 named ubuntu; rummage takes its place. GPU device nodes belong
 # to the host's video/render groups: pass them with --group-add (see README).
 RUN (userdel -r ubuntu 2>/dev/null || true) \
     && groupadd -g 1000 rummage && useradd -u 1000 -g 1000 -d /data -M -s /usr/sbin/nologin rummage \
     && mkdir -p /data && chown rummage:rummage /data
 COPY --from=dist /rummage /usr/local/bin/rummage
+COPY LICENSE NOTICE docker/THIRD-PARTY-NOTICES /usr/share/doc/rummage/
 ENV RUMMAGE_DATA_DIR=/data \
     XDG_CONFIG_HOME=/data/config \
     RUMMAGE_BIND=0.0.0.0:8099 \

@@ -1,5 +1,7 @@
 # rummage
 
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+
 Local multimodal semantic search for your files. One binary serves a web UI and an HTTP API,
 watches the folders you choose, and indexes text, images, documents, audio and video with
 Google DeepMind's [EmbeddingGemma 2](https://huggingface.co/google/embeddinggemma-2), running
@@ -58,9 +60,9 @@ More in [docs/screenshots](docs/screenshots).
 ## Install
 
 Each [release](https://github.com/av/rummage/releases) has one Linux x86_64 build per backend,
-`rummage-<version>-linux-x86_64-<backend>.tar.gz` (the binary, this README and the licences), with
-SHA-256 sums. Pick the one for your GPU; every GPU build also runs on the CPU, with a warning,
-when it finds no GPU.
+`rummage-<version>-linux-x86_64-<backend>.tar.gz` (the binary, this README, LICENSE, NOTICE and
+THIRD-PARTY-NOTICES), with SHA-256 sums. Pick the one for your GPU; every GPU build also runs on
+the CPU, with a warning, when it finds no GPU.
 
 | Backend | For | Needs on the system |
 |---|---|---|
@@ -306,3 +308,10 @@ go to a GitHub pre-release, and the images to ghcr.io.
 Crates: `crates/rummage` (the binary: CLI, server, embedded UI), `crates/rummage-core`
 (config, SQLite store and schema, search, API types, the `Embedder` trait and a fake embedder
 for tests) and `crates/rummage-embed` (the llama.cpp engine).
+
+## Licence
+
+rummage is licensed under the [Apache License 2.0](LICENSE); see [NOTICE](NOTICE). It builds in
+llama.cpp and ggml (MIT) and Rust crates under permissive licences or MPL-2.0. The Docker images
+also contain ffmpeg (GPL) and other distribution packages as separate programs.
+[docs/LICENSES-THIRD-PARTY.md](docs/LICENSES-THIRD-PARTY.md) lists every component and its licence.

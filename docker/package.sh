@@ -10,12 +10,7 @@ trap 'rm -rf "$stage"' EXIT
 
 mkdir "$stage/$name"
 install -m 755 "$bin" "$stage/$name/rummage"
-cp "$root/README.md" "$stage/$name/README.md"
-{
-    cat "$root/docker/NOTICE"
-    printf '\n---------------------------------------- llama.cpp and ggml\n\n'
-    cat "$root/crates/rummage-embed/llama.cpp/LICENSE"
-} >"$stage/$name/LICENSE"
+cp "$root/README.md" "$root/LICENSE" "$root/NOTICE" "$root/docker/THIRD-PARTY-NOTICES" "$stage/$name/"
 
 mkdir -p "$out"
 tar -C "$stage" --owner=0 --group=0 --sort=name -czf "$out/$name.tar.gz" "$name"
