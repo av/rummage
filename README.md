@@ -6,7 +6,7 @@
 
 <p align="center">
   <b>Search your photos, videos, recordings and documents by what is in them.</b><br>
-  Runs on your machine: one binary, on your GPU (Vulkan, ROCm, CUDA) or the CPU.
+  Nothing leaves your machine: one binary, on your GPU (Vulkan, ROCm, CUDA) or the CPU.
 </p>
 
 <p align="center">
@@ -59,7 +59,8 @@ cd rummage-0.1.1-linux-x86_64-vulkan
 ./rummage serve
 ```
 
-Open <http://127.0.0.1:8099/> and describe what you are looking for. The first run downloads the
+Add more folders the same way (or from the page), open <http://127.0.0.1:8099/> and describe
+what you are looking for. The first run downloads the
 model (about 860 MB); results fill in while it indexes. From another terminal:
 
 ```sh
