@@ -19,7 +19,7 @@
   <img src="docs/screenshots/hero.webp" width="100%" alt="The search 花火 (Japanese for fireworks) returns a fireworks video and five fireworks photos; each opens in turn">
 </p>
 
-<p align="center"><sub>Not a single file name or tag says “fireworks”: rummage matched what is <i>in</i> the pictures and the video.</sub></p>
+<p align="center"><sub>No file or folder name says “fireworks”: rummage matched what is <i>in</i> the pictures and the video.</sub></p>
 
 ## It listens, too
 
