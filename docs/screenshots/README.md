@@ -6,29 +6,25 @@ Chromium, dark theme, over the demo library below: 111 files with camera-style n
 
 | File | Shows |
 |---|---|
-| `hero.webp` | The README loop: the search “birds singing”, then the top six results opened in turn, each labelled with what the file is |
-| `whales.png` | “humpback whale jumping out of the water” |
-| `storm.png` | “a storm at night”: a video opened at 0:30 |
-| `pdf.png` | “when do the whales come to Hawaii”: page 2 of a PDF |
-| `text.png` | “how do I bake a loaf of bread”: a note at the matching passage |
-| `fireworks.png` | “花火” (Japanese for fireworks) |
+| `hero.webp` | The README loop: “花火” (Japanese for fireworks), then the top six results opened in turn |
+| `birds-singing.mp4`, `birds-singing-poster.png` | “birds singing”, 23 s with sound: the browser played into a private audio sink that was recorded alongside the screen, so the sound is what the page played |
+| `whales.png` | “humpback whale jumping out of the water”, first row of results |
+| `storm.png` | “a storm at night”, first row: a video opened at 0:30 |
 | `folders.png` | The folders drawer while indexing |
 | `landing.png`, `first-run.png` | The start page, and the first run (the folders drawer opens by itself) |
 | `phone-results.png`, `phone-preview.png` | A search on a phone |
 
 ## The queries
 
-Over sixty candidate queries were run against the library; these are the ones whose top results
-were all clearly right. Top three of each, as the server returned them:
+Top three of each query shown in the README, as the server returned them:
 
 | Query | 1 | 2 | 3 |
 |---|---|---|---|
+| 花火 | `VID_20250815_2012.webm`: fireworks bursting over the sea | `IMG_2108.jpg`: New Year fireworks | `IMG_2465.jpg`: a fireworks display at night |
 | birds singing | `REC_0451.ogg` at 2:30: a dawn chorus | `VID_20250504_0611.mp4` at 0:50: the moment a song sparrow starts singing, after 50 s of clouds | `REC_0457.ogg` at 2:05: a nightingale |
 | humpback whale jumping out of the water | `IMG_2248.jpg`: a humpback breaching | `IMG_2297.jpg`: a humpback breaching | `IMG_2325.jpg`: a humpback breaching |
-| a storm at night | `VID_20240718_2131.mp4` at 0:30: lightning, in a clip that starts on a sunny beach | `IMG_2255.jpg`: cloud-to-ground lightning at night | `IMG_2241.jpg`: lightning bolts hitting the ground |
-| when do the whales come to Hawaii | `booking_HNL_2291.pdf` p. 2: “From December to April around ten thousand humpbacks come to Hawaiian waters” | `VID_20250212_0935.webm`: whales underwater | `IMG_2325.jpg`: a humpback breaching |
-| how do I bake a loaf of bread | `Notes/sourdough.md`: the method (autolyse, folds, bake) | `IMG_2444.jpg`: a sourdough loaf cooling | `IMG_2269.jpg`: a loaf on a cooling rack |
-| 花火 | `VID_20250815_2012.webm`: fireworks over the sea | `IMG_2108.jpg`: New Year fireworks | `IMG_2465.jpg`: a fireworks display |
+| a storm at night | `VID_20240718_2131.mp4` at 0:30: storm clouds lit by lightning, in a clip that starts on a sunny beach | `IMG_2255.jpg`: lightning at night | `IMG_2241.jpg`: lightning bolts at night |
+| Nordlichter | `IMG_2402.jpg`: aurora over Alaska | `IMG_2353.jpg`: aurora over Lofoten | `IMG_2094.jpg`: aurora borealis |
 
 ## Demo library
 
