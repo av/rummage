@@ -29,12 +29,12 @@ They include ffmpeg and poppler, run as user 1000, keep everything (config, inde
 the `/data` volume, listen on port 8099 and have a healthcheck on `/api/v1/health`.
 
 ```sh
- Vulkan or ROCm on AMD/Intel: pass the GPU device nodes and the host groups that own them.
+# Vulkan or ROCm on AMD/Intel: pass the GPU device nodes and the host groups that own them.
 docker run -d --name rummage -p 8099:8099 -v rummage-data:/data -v ~/Pictures:/media/Pictures:ro \
   --device /dev/dri --group-add $(getent group render | cut -d: -f3) --group-add $(getent group video | cut -d: -f3) \
   ghcr.io/av/rummage:latest-vulkan
- ROCm: the same plus --device /dev/kfd, with the :latest-rocm image.
- CUDA (with the NVIDIA container toolkit):
+# ROCm: the same plus --device /dev/kfd, with the :latest-rocm image.
+# CUDA (with the NVIDIA container toolkit):
 docker run -d --name rummage -p 8099:8099 -v rummage-data:/data --gpus all ghcr.io/av/rummage:latest-cuda
 
 docker exec rummage rummage folders add /media/Pictures

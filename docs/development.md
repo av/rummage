@@ -4,7 +4,7 @@
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
- speed checks (search over 300k vectors, first-pass throughput), on the target machine:
+# speed checks (search over 300k vectors, first-pass throughput), on the target machine:
 cargo test --release -p rummage --test bench -- --ignored --nocapture
 ```
 
