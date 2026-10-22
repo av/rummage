@@ -15,6 +15,8 @@
   const folder = $derived(dirname(item.path).split('/').pop() || '/');
   // The server marks the words that matched; names without a passage are marked here.
   const parts = $derived(seg?.snippet?.length ? seg.snippet : highlight(seg?.text || item.name, words));
+  // A document page that matched by its picture has no text to show: show the page itself.
+  const pagePic = $derived(item.kind === 'doc' && seg?.page != null && !seg.text && !seg.snippet?.length);
 
   let loaded = $state(false);
   let failed = $state(false);
@@ -28,6 +30,7 @@
       const t = Math.floor(seg.t_start);
       return triedPoster ? media(item.urls.preview, { t }) : media(item.urls.thumb, { t });
     }
+    if (pagePic) return media(item.urls.preview, { page: seg?.page ?? undefined });
     return media(item.urls.thumb);
   });
 
@@ -94,6 +97,9 @@
         {/if}
       </div>
       <span class="badge"><AudioLines size={12} />{at || 'Audio'}</span>
+    {:else if pagePic && !failed}
+      <img {src} alt="" loading="lazy" decoding="async" class="page" class:loaded onload={() => (loaded = true)} {onerror} />
+      <span class="badge soft"><FileType size={12} />{at}</span>
     {:else}
       <p class="snippet">
         {#each parts as part, i (i)}{#if part.hit}<mark>{part.text}</mark>{:else}{part.text}{/if}{/each}
@@ -163,6 +169,10 @@
       opacity 320ms var(--ease),
       filter 420ms var(--ease),
       transform 420ms var(--ease);
+  }
+  img.page {
+    object-fit: contain;
+    padding: 10px 0;
   }
   img.loaded {
     opacity: 1;
