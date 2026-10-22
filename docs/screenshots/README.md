@@ -6,7 +6,7 @@ Chromium, dark theme, over the demo library below: 111 files with camera-style n
 
 | File | Shows |
 |---|---|
-| `hero.webp` | The README loop: typing “birds singing”, then stepping through the top six results |
+| `hero.webp` | The README loop: the search “birds singing”, then the top six results opened in turn, each labelled with what the file is |
 | `whales.png` | “humpback whale jumping out of the water” |
 | `storm.png` | “a storm at night”: a video opened at 0:30 |
 | `pdf.png` | “when do the whales come to Hawaii”: page 2 of a PDF |

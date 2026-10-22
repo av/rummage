@@ -6,7 +6,7 @@
 
 <p align="center">
   <b>Search your photos, videos, recordings and documents by what is in them.</b><br>
-  Local. One binary. Runs on your GPU.
+  Runs on your machine: one binary, on your GPU (Vulkan, ROCm, CUDA) or the CPU.
 </p>
 
 <p align="center">
@@ -16,47 +16,40 @@
 </p>
 
 <p align="center">
-  <img src="docs/screenshots/hero.webp" width="100%" alt="Typing 'birds singing' returns two birdsong recordings at the moment the singing starts, a video at 0:50 where a sparrow sings, a page of a PDF flyer about a bird walk, and photos of singing birds">
+  <img src="docs/screenshots/hero.webp" width="100%" alt="The search 'birds singing' returns a dawn-chorus recording opened at 2:30, a video opened at 0:50 where a song sparrow starts singing, a nightingale recording, page 1 of a bird-walk flyer PDF, a blackbird recording and a photo of a singing sparrow">
 </p>
 
-<p align="center"><sub>One query, <b>“birds singing”</b>. Every file is named like <code>REC_0451.ogg</code> or <code>IMG_2339.jpg</code>.<br>
+<p align="center"><sub>One query, <b>“birds singing”</b>, over files named like <code>REC_0451.ogg</code> and <code>IMG_2339.jpg</code>.<br>
 rummage <i>listened</i> to the recordings, <i>watched</i> the video and <i>read</i> the PDF.</sub></p>
 
 ## What grep and Spotlight can’t find
 
-A camera roll is `IMG_2248.jpg` all the way down. rummage looks at, listens to and reads the files
-themselves, so you search for what you remember, and land on the exact page or second.
+File names say `IMG_2248.jpg`. rummage searches what is inside: the picture, the sound, the page.
 
-<table>
-<tr>
-<td width="50%"><img src="docs/screenshots/whales.png" alt="Search 'humpback whale jumping out of the water': three photos of breaching humpbacks first, then a booking PDF and two whale tails"><br>
-<b>“humpback whale jumping out of the water”</b><br>
-<sub>Three breaching humpbacks, then the tails. No file name says “whale”.</sub></td>
-<td width="50%"><img src="docs/screenshots/storm.png" alt="Search 'a storm at night': a video opened at 0:30 on a lightning storm, beside photos of lightning"><br>
-<b>“a storm at night”</b><br>
-<sub>Opens a clip at 0:30: it starts on a sunny beach, the lightning comes later.</sub></td>
-</tr>
-<tr>
-<td><img src="docs/screenshots/pdf.png" alt="Search 'when do the whales come to Hawaii': page 2 of a boat booking PDF that says From December to April"><br>
-<b>“when do the whales come to Hawaii”</b><br>
-<sub>Page 2 of a boat booking: “From December to April…”. A question, answered by a PDF.</sub></td>
-<td><img src="docs/screenshots/text.png" alt="Search 'how do I bake a loaf of bread': a sourdough note open at the method, beside photos of loaves"><br>
-<b>“how do I bake a loaf of bread”</b><br>
-<sub>The method in your notes, and the loaves you photographed afterwards.</sub></td>
-</tr>
-<tr>
-<td><img src="docs/screenshots/fireworks.png" alt="Search '花火': a video of fireworks and five photos of fireworks"><br>
-<b>“花火”</b><br>
-<sub>Japanese for fireworks. Nothing in the library is in Japanese.</sub></td>
-<td><img src="docs/screenshots/folders.png" alt="The folders drawer while indexing: five folders with live progress"><br>
-<b>Point it at your folders</b><br>
-<sub>It indexes in the background and keeps watching. Search works from the first file.</sub></td>
-</tr>
-</table>
+**“humpback whale jumping out of the water”**: breaching humpbacks first, then the rest of the whales. No file name says “whale”.
+
+<img src="docs/screenshots/whales.png" alt="Search 'humpback whale jumping out of the water': three photos of breaching humpbacks first, then a booking PDF and two whale tails; one breaching photo open">
+
+**“a storm at night”**: opens a clip at 0:30, where a sunny beach has given way to lightning.
+
+<img src="docs/screenshots/storm.png" alt="Search 'a storm at night': a video opened at 0:30 on a storm lighting up the clouds, beside photos of lightning">
+
+**“when do the whales come to Hawaii”**: page 2 of a boat booking PDF. “From December to April…”
+
+<img src="docs/screenshots/pdf.png" alt="Search 'when do the whales come to Hawaii': page 2 of a boat booking PDF, the matching paragraph highlighted in its card, beside whale photos and an underwater whale video">
+
+**“how do I bake a loaf of bread”**: the method in a notes file, then the loaves you photographed.
+
+<img src="docs/screenshots/text.png" alt="Search 'how do I bake a loaf of bread': a sourdough note open at the method, beside five photos of loaves">
+
+**“花火”**: Japanese for fireworks. Nothing in the library is in Japanese.
+
+<img src="docs/screenshots/fireworks.png" alt="Search '花火': a fireworks video and five fireworks photos; one photo open">
 
 ## Try it
 
-Linux x86_64 with any recent GPU ([other builds](docs/install.md)):
+Linux x86_64. This is the Vulkan build: recent AMD, NVIDIA and Intel GPUs, with a CPU fallback.
+ROCm, CUDA and CPU builds, Docker images and building from source: [Install](docs/install.md).
 
 ```sh
 curl -LO https://github.com/av/rummage/releases/download/v0.1.1/rummage-0.1.1-linux-x86_64-vulkan.tar.gz
@@ -67,38 +60,34 @@ cd rummage-0.1.1-linux-x86_64-vulkan
 ```
 
 Open <http://127.0.0.1:8099/> and describe what you are looking for. The first run downloads the
-model (about 860 MB) from Hugging Face; results fill in while it indexes. The CLI works too:
+model (about 860 MB); results fill in while it indexes. From another terminal:
 
 ```sh
 ./rummage search "birds singing"
 ./rummage doctor        # GPU, model files, ffmpeg, poppler, config
 ```
 
-## Why it’s different
+On an AMD Radeon 8060S the demo library above (111 files) indexes in under two minutes, and a
+search answers in about 10 ms ([benchmarks](docs/BENCH-fedora.md)).
 
-- **Sees, hears, reads.** Photos, video frames and soundtracks, audio, PDF text and page images,
-  notes and code: one index, one search box.
-- **Lands on the moment.** Videos and recordings open at the matching seconds, PDFs at the page,
-  notes at the passage.
-- **Any language.** Ask in Japanese, German or Spanish: Google DeepMind’s
-  [EmbeddingGemma 2](https://huggingface.co/google/embeddinggemma-2) is multilingual.
+## Also
+
 - **Search by example.** Drop a photo, a sound or a note on the page to find what is like it.
-- **Private.** Everything runs on your machine. No account, no cloud, no uploads.
-- **One binary, any GPU.** Web UI, CLI and HTTP API in one executable, on Vulkan, ROCm, CUDA or CPU.
+- **Other languages.** “花火” finds the fireworks; “Nordlichter” finds the northern lights.
+  The model is Google DeepMind’s multilingual [EmbeddingGemma 2](https://huggingface.co/google/embeddinggemma-2).
+- **Private.** Files and queries never leave your machine. No account, no cloud.
 - **Keeps up.** New, changed, moved and deleted files are picked up as they happen.
+- **Scriptable.** Everything the page does goes through an HTTP API, and there is a CLI.
 
 ## Docs
 
-[Install](docs/install.md) (release builds, Docker, from source) ·
-[Using rummage](docs/usage.md) (web page, CLI, reverse proxy) ·
-[Configuration](docs/configuration.md) ·
-[HTTP API](docs/api.md) ·
-[How it works](docs/how-it-works.md) (supported files, indexing, search) ·
-[Development](docs/development.md)
-
-The demo library behind these screenshots is public-domain and CC0 media from Wikimedia Commons,
-plus a few documents written for it; [docs/screenshots](docs/screenshots/README.md) lists every
-file and the queries.
+- [Install](docs/install.md): release builds, Docker, from source
+- [Using rummage](docs/usage.md): the web page, the CLI, running behind a proxy
+- [Configuration](docs/configuration.md) · [HTTP API](docs/api.md)
+- [How it works](docs/how-it-works.md): supported files, indexing, search
+- [Development](docs/development.md)
+- [Screenshots and demo library](docs/screenshots/README.md): every query and file shown here
+  (public-domain and CC0 media from Wikimedia Commons, plus a few documents written for the demo)
 
 ## Licence
 
