@@ -1,68 +1,83 @@
 # rummage
 
+[![CI](https://github.com/av/rummage/actions/workflows/ci.yml/badge.svg)](https://github.com/av/rummage/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/av/rummage?include_prereleases&label=release)](https://github.com/av/rummage/releases)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-Local multimodal semantic search for your files. One binary serves a web UI and an HTTP API,
-watches the folders you choose, and indexes text, images, documents, audio and video with
-Google DeepMind's [EmbeddingGemma 2](https://huggingface.co/google/embeddinggemma-2), running
-on llama.cpp with CUDA, ROCm, Vulkan or CPU.
+**Search your own photos, videos, recordings, PDFs and notes by describing what is in them.**
+rummage runs on your machine: one binary with a web UI, a CLI and an HTTP API, and Google
+DeepMind's [EmbeddingGemma 2](https://huggingface.co/google/embeddinggemma-2) on your GPU
+(Vulkan, ROCm or CUDA) or CPU. Nothing leaves your computer.
 
-The program, config, CLI, API, web UI, indexer and embedding engine are in place. The model
-files download into `model.dir` the first time something is embedded.
+![Searching "evening by the sea" finds photos, a video, a PDF page and recordings, none of them named that way](docs/screenshots/hero.png)
+
+## Why not grep or Spotlight?
+
+Those match the words in file names and text. rummage matches meaning, and looks inside pictures
+and sound:
+
+- **"boats at sunset"** finds `IMG_2041.jpg` because of what is in the photo, not its name.
+- **"how do I remove limescale"** opens a coffee machine manual at the descaling page, though
+  the manual never says "limescale".
+- **"stars seen from orbit"** starts a 4-minute video at the 30-second mark where they
+  appear, and **"people clapping"** finds a recording of applause by its sound.
+- One search covers every kind of file. Keyword matches are fused in too, so exact names,
+  codes and phrases still count when you type them.
+- It keeps up by itself: new, changed, moved and deleted files are noticed as they happen.
 
 ## Quickstart
 
-```sh
-cargo build --release                 # CPU build; GPU builds: --features vulkan|rocm|cuda
-./target/release/rummage folders add ~/Pictures
-./target/release/rummage serve        # http://127.0.0.1:8099/
-./target/release/rummage search "red bicycle by a lake"
-./target/release/rummage doctor       # checks config, index, folders, GPU and ffmpeg
-```
-
-Behind a proxy under a sub-path (e.g. nginx `location /search/ { proxy_pass http://127.0.0.1:8099/; }`):
+On Linux x86_64 with any recent GPU (for other GPUs or none, pick another build under
+[Install](#install)):
 
 ```sh
-rummage serve --bind 0.0.0.0:8099 --base-path /search
+curl -LO https://github.com/av/rummage/releases/download/v0.1.1/rummage-0.1.1-linux-x86_64-vulkan.tar.gz
+tar xzf rummage-0.1.1-linux-x86_64-vulkan.tar.gz
+cd rummage-0.1.1-linux-x86_64-vulkan
+./rummage folders add ~/Pictures
+./rummage serve
 ```
 
-rummage accepts requests with or without the prefix, and honours `X-Forwarded-Prefix` when the
-proxy strips it, so links in responses and the UI always carry the right prefix.
+Open <http://127.0.0.1:8099/> and type what you are looking for. Indexing starts right away; the
+first time, rummage downloads the model (about 860 MB) from Hugging Face. Searches work while it
+indexes, and results fill in as it goes. From another terminal, in the same directory:
 
-The CLI talks to a running server when it finds one (at `server.bind`, or `--server URL`) and
-opens the index directly otherwise (`--local` forces that).
+```sh
+./rummage search "boats at sunset"
+./rummage doctor        # what it found: GPU, model files, ffmpeg, poppler, config
+```
 
-## The web page
+## What it looks like
 
-`rummage serve` serves a search page at `/` (or under `--base-path`). Type to search; results
-come as you type, and a click (or Enter) opens a preview beside them: photos with zoom and EXIF,
-video and audio from the matching moment, PDFs at the matching page, text at the matching passage.
+Every result opens a preview beside the list, at the part that matched.
 
-- `/` jumps to the search box from anywhere; Enter opens the top result.
-- Arrow keys move through results; in the preview, Left/Right go to the previous/next result and
-  Esc closes it.
+| Photos: zoom and camera details | Video: plays from the matching moment |
+|---|---|
+| ![Photo preview with camera details](docs/screenshots/photo.png) | ![Video preview playing from 0:30](docs/screenshots/video.png) |
+| **Audio: waveform, matching window marked** | **PDFs: opens at the matching page** |
+| ![Audio preview with the matching window on the waveform](docs/screenshots/audio.png) | ![PDF preview at page 2](docs/screenshots/pdf.png) |
+| **Text and code: the matching passage** | **Folders: add, exclude, pause, live progress** |
+| ![Text preview at the matching passage](docs/screenshots/text.png) | ![Folders drawer while indexing](docs/screenshots/folders.png) |
+
+- `/` jumps to the search box from anywhere; Enter opens the top result. Arrow keys move through
+  results; in the preview, Left/Right go to the previous/next result and Esc closes it.
 - Drop or paste an image, audio or text file anywhere to search by it; "More like this" does the
   same for any result.
-- The URL holds the search (`?q=&type=&folder=&date=&in=&like=&item=`), so links and Back/Forward
-  work, and other pages can link straight to results or to an open item.
-- The folder icon opens the folders drawer: add folders (paste a path or browse the server),
-  exclude, reindex, pause or resume all indexing, see each folder's progress and time left live,
-  and see which files could not be read and why (with a "Try again"). On first run it opens by
-  itself. Notes from the server (e.g. ffmpeg missing, the model still loading) show under the
-  search box.
-
-![Results and preview](docs/screenshots/desktop-dark-preview.png)
-
-![Folders drawer while indexing](docs/screenshots/real-dark-drawer-indexing.png)
-
-More in [docs/screenshots](docs/screenshots).
+- Filter by kind, folder and date. The URL holds the search (`?q=&type=&folder=&date=&in=&like=&item=`),
+  so links, bookmarks and Back/Forward work.
+- The folder button opens the folders drawer: add folders (paste a path or browse the server),
+  exclude files, reindex, pause or resume indexing, watch each folder's progress and time left,
+  and see which files could not be read and why. On first run it opens by itself.
+- Light and dark themes, and a layout for phones ([screenshots](docs/screenshots)).
 
 ## Install
 
+### Release builds
+
 Each [release](https://github.com/av/rummage/releases) has one Linux x86_64 build per backend,
 `rummage-<version>-linux-x86_64-<backend>.tar.gz` (the binary, this README, LICENSE, NOTICE and
-THIRD-PARTY-NOTICES), with SHA-256 sums. Pick the one for your GPU; every GPU build also runs on
-the CPU, with a warning, when it finds no GPU.
+THIRD-PARTY-NOTICES), with SHA-256 sums. Every GPU build also runs on the CPU, with a warning,
+when it finds no GPU.
 
 | Backend | For | Needs on the system |
 |---|---|---|
@@ -72,15 +87,18 @@ the CPU, with a warning, when it finds no GPU.
 | `cpu` | no GPU | nothing extra |
 
 All builds need glibc 2.39 or newer (Ubuntu 24.04, Fedora 40, Debian 13) and an x86-64-v3 CPU
-(AVX2, FMA: Intel Haswell or AMD Zen and later). llama.cpp is linked in statically, and so is
-the CUDA runtime; the vendor libraries above stay dynamic. `ffmpeg` on `PATH` adds video, and
-`rummage doctor` shows what the binary found: backend, GPUs, model files, ffmpeg, config path.
+(AVX2, FMA: Intel Haswell or AMD Zen and later). llama.cpp and the CUDA runtime are linked in
+statically; the vendor libraries above stay dynamic.
+
+Two optional tools add file types: **ffmpeg** (and ffprobe) for video and HEIC/AVIF photos, and
+**poppler-utils** (`pdftoppm`, `pdftotext`) for PDF page images. Without ffmpeg, videos are
+listed as skipped with the reason; without poppler, PDFs are indexed by their text only.
 
 ### Docker
 
 Images are `ghcr.io/av/rummage:<version>-<backend>` and `ghcr.io/av/rummage:latest-<backend>`.
-They include ffmpeg, run as user 1000, keep everything (config, index, models) in the `/data`
-volume, listen on port 8099 and have a healthcheck on `/api/v1/health`.
+They include ffmpeg and poppler, run as user 1000, keep everything (config, index, models) in
+the `/data` volume, listen on port 8099 and have a healthcheck on `/api/v1/health`.
 
 ```sh
 # Vulkan or ROCm on AMD/Intel: pass the GPU device nodes and the host groups that own them.
@@ -95,11 +113,77 @@ docker exec rummage rummage folders add /media/Pictures
 docker exec rummage rummage doctor
 ```
 
-`docker/Dockerfile` builds any of them from source:
-`docker build -f docker/Dockerfile --build-arg BACKEND=rocm -t rummage:rocm .`
-(after `git submodule update --init --depth 1`).
+### From source
 
-## Config reference
+Needs Rust 1.88 or newer, CMake, a C/C++ compiler and [bun](https://bun.sh) (which builds the
+web UI; without it the binary serves a placeholder page). GPU builds also need that backend's
+SDK: the Vulkan headers and `glslc`, ROCm 7, or the CUDA 12 toolkit.
+
+```sh
+git clone --recursive https://github.com/av/rummage
+cd rummage
+cargo build --release                 # CPU; GPU builds: --features vulkan|rocm|cuda
+./target/release/rummage serve
+```
+
+`docker build -f docker/Dockerfile --build-arg BACKEND=rocm -t rummage:rocm .` builds an image
+for any backend without installing its SDK.
+
+## Command line
+
+```
+rummage serve [--bind ADDR] [--base-path PATH]     run the web UI and the API
+rummage folders add <path> [--exclude GLOB]... [--include GLOB]...
+rummage folders set <path|id> [--off | --on] [--exclude GLOB]... [--include GLOB]...
+                                                   turn a folder off or on, or replace its globs
+rummage folders rm <path|id>                       stop indexing; drops it from the index, not the disk
+rummage folders ls [--json]
+rummage index [--once | --watch]                   index now; --watch keeps following changes
+rummage index --pause | --resume                   pause or resume a running server's indexing
+rummage reindex [--folder PATH|ID | --item ID | --problems]
+                                                   index again (everything by default)
+rummage search <query...> | --similar ID | --file PATH
+               [--type KIND,...] [--folder PATH|ID]... [--path GLOB]
+               [--after YYYY-MM-DD] [--before YYYY-MM-DD] [--mode hybrid|vector|keyword]
+               [--limit N] [--json]
+rummage item <id> [--query Q] [--json]             one item and its passages, pages or time windows
+rummage status [--json] [--errors]                 counts per kind and folder; --errors lists failures
+rummage config get [key] | set <key> <value> | path
+rummage doctor                                     check config, index, folders, GPU, ffmpeg, poppler
+```
+
+The CLI talks to a running server when it finds one (at `server.bind`, or `--server URL`) and
+opens the index directly otherwise (`--local` forces that). Global options: `--config FILE`
+(`RUMMAGE_CONFIG`), `--server URL` (`RUMMAGE_SERVER`), `--local`. `rummage <command> --help`
+describes each one. Log detail follows `RUST_LOG`.
+
+### Behind a reverse proxy
+
+To serve under a sub-path (e.g. nginx `location /search/ { proxy_pass http://127.0.0.1:8099/; }`):
+
+```sh
+rummage serve --bind 0.0.0.0:8099 --base-path /search
+```
+
+rummage accepts requests with or without the prefix and honours `X-Forwarded-Prefix` when the
+proxy strips it, so links in responses and the UI always carry the right prefix. Set
+`server.auth_token` before exposing it beyond your machine.
+
+## Supported files
+
+Files are found by extension; everything else is ignored, as are symlinks, the directories in
+`index.skip` (plus `.git`, `node_modules` and `__pycache__`), and anything matching a folder's
+`exclude` globs.
+
+| Kind | Files | What is searchable | Results point to |
+|---|---|---|---|
+| image | jpg, png, webp, gif, bmp, tiff; heic, heif, avif (with ffmpeg); RAW (its embedded preview) | the picture, upright; EXIF date, camera and place as keywords | |
+| video | mp4, m4v, mkv, webm, mov, avi (with ffmpeg) | 1 frame per second in 10 s windows, plus the sound track | the moment |
+| audio | wav, mp3, flac, ogg, m4a, aac | the sound, in 30 s windows overlapping by 5 s | the moment |
+| doc | pdf | each page's text, and each page as a picture (first 300 pages; pictures need poppler) | the page |
+| text | txt, md, mdx, code, csv, json, yaml, html, ... | passages of about 1,000 tokens; the title is the first heading, the HTML `<title>` or the name | the passage |
+
+## Config
 
 The config file is `~/.config/rummage/config.toml` (`$XDG_CONFIG_HOME` is honoured;
 `--config FILE` or `RUMMAGE_CONFIG` picks another). It is optional: missing keys take the
@@ -151,32 +235,6 @@ Environment overrides change only the running program; they are never written to
 Keys under `data_dir`, `server`, `model`, `engine`, `tools` and `index.concurrency` need a restart of
 `rummage serve`; folders and the other `index` keys apply live.
 
-## CLI reference
-
-```
-rummage serve [--bind ADDR] [--base-path PATH]     run the web UI and the API
-rummage folders add <path> [--exclude GLOB]... [--include GLOB]...
-rummage folders set <path|id> [--off | --on] [--exclude GLOB]... [--include GLOB]...
-                                                   turn a folder off or on, or replace its globs
-rummage folders rm <path|id>                       stop indexing; drops it from the index, not the disk
-rummage folders ls [--json]
-rummage index [--once | --watch]                   index now; --watch keeps following changes
-rummage index --pause | --resume                   pause or resume a running server's indexing
-rummage reindex [--folder PATH|ID | --item ID | --problems]
-                                                   index again (everything by default)
-rummage search <query...> | --similar ID | --file PATH
-               [--type KIND,...] [--folder PATH|ID]... [--path GLOB]
-               [--after YYYY-MM-DD] [--before YYYY-MM-DD] [--mode hybrid|vector|keyword]
-               [--limit N] [--json]
-rummage item <id> [--query Q] [--json]             one item and its passages, pages or time windows
-rummage status [--json] [--errors]                 counts per kind and folder; --errors lists failures
-rummage config get [key] | set <key> <value> | path
-rummage doctor
-```
-
-Global options: `--config FILE` (`RUMMAGE_CONFIG`), `--server URL` (`RUMMAGE_SERVER`), `--local`.
-`rummage <command> --help` describes each one. Log detail follows `RUST_LOG`.
-
 ## HTTP API
 
 Everything the UI does goes through `/api/v1`. The OpenAPI description is at
@@ -207,62 +265,47 @@ Everything the UI does goes through `/api/v1`. The OpenAPI description is at
 Errors are `{"error": "<code>", "message": "…"}` with codes `bad_request`, `unauthorized`,
 `not_found`, `conflict`, `unsupported`, `not_ready` and `internal`.
 
-## Indexing
+## How it works
 
-`rummage serve` indexes the enabled folders in the background and keeps following them;
-`rummage index` does one pass. Files are found by extension; everything else is ignored, as are
-symlinks, the directories in `index.skip` (plus `.git`, `node_modules` and `__pycache__`), and
-anything matching a folder's `exclude` globs.
+**Indexing.** `rummage serve` indexes the enabled folders in the background and keeps following
+them; `rummage index` does one pass. Changes are noticed through inotify (one watch per indexed
+directory; events are batched for half a second) and by a full rescan every
+`index.scan_interval_secs`. A file whose size and modification time are unchanged is left alone;
+same size with a new time is compared by BLAKE3 hash. A file that appears where another vanished
+with the same hash is a move: it keeps its vectors. A folder whose root is missing (an unmounted
+disk) is skipped rather than emptied.
 
-| Kind | Files | What is embedded | Locator |
-|---|---|---|---|
-| image | jpg, png, webp, gif, bmp, tiff; heic, heif, avif (through ffmpeg); RAW (its embedded preview) | the picture, upright (EXIF orientation); EXIF date, camera and GPS go into the keyword index and `exif` | |
-| text | txt, md, mdx, code, csv, json, yaml, html, ... | passages of about 1k tokens (4,000 characters) overlapping by 400 characters; the title is the first markdown heading, the HTML `<title>`, or the file name | |
-| doc | pdf | each page's text as passages, and each page as an image (first 300 pages) | page |
-| audio | wav, mp3, flac, ogg, m4a, aac | 16 kHz mono in 30 s windows that overlap by 5 s | `t_start`, `t_end` |
-| video | mp4, m4v, mkv, webm, mov, avi | 1 frame per second in 10 s windows, plus the sound track as audio windows | `t_start`, `t_end` |
+Work is queued by priority (searches first, then new and changed files, then the first pass and
+re-indexing) and runs on `index.concurrency` workers. A file that fails is recorded with its
+error (`rummage status --errors`, `GET /api/v1/index/problems`) and the rest carry on;
+`rummage reindex --problems` tries them again. Text is split into passages of 4,000 characters
+overlapping by 400; images are embedded upright (EXIF orientation), and their EXIF date, camera
+and GPS go into the keyword index. PDFs are read with poppler when it is installed (page images
+and text) and with a built-in reader otherwise (text only). A video codec the installed ffmpeg
+can't decode (Fedora's `ffmpeg-free` has no HEVC) is skipped with that reason; point
+`tools.ffmpeg` at a full build (e.g. a static one from
+[BtbN/FFmpeg-Builds](https://github.com/BtbN/FFmpeg-Builds)) to index those.
 
-Changes are noticed through inotify (one watch per indexed directory; events are batched for
-half a second) and by a full rescan every `index.scan_interval_secs`. A file whose size and
-modification time are unchanged is left alone; same size with a new time is compared by BLAKE3
-hash. A file that appears where another vanished with the same hash is a move: it keeps its
-vectors. A folder whose root is missing (an unmounted disk) is skipped rather than emptied.
-
-Work is queued by priority (searches first, then new and changed files, then the first pass
-and re-indexing) and runs on `index.concurrency` workers. A file that fails is recorded with
-its error (`rummage status --errors`, `GET /api/v1/index/problems`) and the rest carry on;
-`rummage reindex --problems` tries them again. The status shows the measured rate and the
-estimated time left, per folder too.
-
-Outside tools, both optional: **ffmpeg** (and ffprobe) for video and HEIC/AVIF photos, and
-**poppler-utils** (`pdftoppm`, `pdftotext`) for PDF page images and text. Without ffmpeg,
-videos are listed as skipped with the reason; without poppler, PDFs are indexed by their text
-through a built-in reader, without page images. poppler was picked over pdfium because it is a
-standard package next to ffmpeg, while pdfium would mean shipping or downloading a shared
-library beside the binary. A video codec that the installed ffmpeg can't decode (Fedora's
-`ffmpeg-free` has no HEVC) is skipped with that reason too; point `tools.ffmpeg` at a full build
-(e.g. a static one from [BtbN/FFmpeg-Builds](https://github.com/BtbN/FFmpeg-Builds)) to index them.
-
-Search embeds the query (`task: search result | query: …`), scores every stored vector exactly
-(all vectors are held in memory, at `model.dim` length, and updated as files are indexed), runs
-an FTS5 keyword search over names, paths, text and EXIF (words are stemmed, so "claps" finds
-`Clap_01.wav` and "invoices" finds "invoice"; names also match by their camelCase parts, so
-"petalia" finds `SpiralPetalia.mp4`), and fuses the two rankings with
+**Search.** The query is embedded (`task: search result | query: …`) and scored against every
+stored vector exactly (all vectors are held in memory at `model.dim` length and updated as files
+are indexed). An FTS5 keyword search runs over names, paths, text and EXIF (words are stemmed, so
+"claps" finds `Clap_01.wav` and "invoices" finds "invoice"; names also match by their camelCase
+parts, so "petalia" finds `SpiralPetalia.mp4`), and the two rankings are fused with
 reciprocal-rank fusion. Results are grouped per file with the best-matching segment, so a video
-hit carries the moment and a PDF hit the page; text hits carry a snippet with the matching
-words marked. Thumbnails (WebP, `index.thumbnail_size`) are made while indexing; page and frame
+hit carries the moment and a PDF hit the page; text hits carry a snippet with the matching words
+marked. Thumbnails (WebP, `index.thumbnail_size`) are made while indexing; page and frame
 previews are rendered on first request. Both live under `<data_dir>/thumbs` and
 `<data_dir>/previews`.
 
-Videos in a codec that browsers don't all play (anything but H.264, VP8, VP9 and AV1, as the
-indexer's ffprobe found it, or any AVI) get a playable copy: H.264 and AAC in a fast-start MP4,
-at most 1280 pixels on the long edge and 60 frames a second, made with the configured ffmpeg
-(x264, else OpenH264; CPU only) under `<data_dir>/playable`. The web page asks for it when the
-browser can't play the original (HEVC phone videos in Chrome or Firefox on Linux, for example),
-shows the progress while it is made (a minute of 1080p HEVC takes 7 to 11 s on a 16-core
-machine), then plays it from the matched moment; if it can't be made, it plays the original
-and says when only the sound comes through. `GET /api/v1/items/{id}/raw` always sends the
-original.
+**Video playback.** Videos in a codec that browsers don't all play (anything but H.264, VP8, VP9
+and AV1, as the indexer's ffprobe found it, or any AVI) get a playable copy: H.264 and AAC in a
+fast-start MP4, at most 1280 pixels on the long edge and 60 frames a second, made with the
+configured ffmpeg (x264, else OpenH264; CPU only) under `<data_dir>/playable`. The web page asks
+for it when the browser can't play the original (HEVC phone videos in Chrome or Firefox on
+Linux, for example), shows the progress while it is made (a minute of 1080p HEVC takes 7 to
+11 s on a 16-core machine), then plays it from the matched moment; if it can't be made, it plays
+the original and says when only the sound comes through. `GET /api/v1/items/{id}/raw` always
+sends the original.
 
 ## Development
 
@@ -290,9 +333,14 @@ bun run check                      # svelte-check and TypeScript
 bunx playwright install chromium
 bunx playwright test               # end-to-end tests against mock servers
 RUMMAGE_BIN=../../../target/debug/rummage bunx playwright test   # plus the real binary
-bun run screenshots                # refresh docs/screenshots
+bun run screenshots                # screenshots of the mock UI into docs/screenshots, for checking UI changes
 SPEC=openapi.json bun run gen:api  # refresh src/lib/api-types.ts from /api/openapi.json
 ```
+
+The screenshots in this README come from the real binary and a sample of public-domain files;
+[docs/screenshots/README.md](docs/screenshots/README.md) lists the files and how they were taken.
+
+### CI and releases
 
 CI (`.github/workflows/ci.yml`) runs on a self-hosted GitHub Actions runner on fedora (one job
 at a time; each job waits while the machine's load is above 70% of its threads). It runs those

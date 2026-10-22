@@ -21,17 +21,40 @@ use crate::{engine, indexer, server};
     long_about = "Local multimodal semantic search for your files.\n\n\
         `rummage serve` runs the web UI and the HTTP API. The other commands talk to a running \
         server when there is one, and open the index directly when there isn't.",
-    after_help = "Config: ~/.config/rummage/config.toml (see `rummage config path`); RUMMAGE_* variables override it."
+    after_help = "Examples:\n  \
+        rummage folders add ~/Pictures         start indexing a folder\n  \
+        rummage serve                          web UI and API at http://127.0.0.1:8099/\n  \
+        rummage search \"boats at sunset\"\n  \
+        rummage search --type image,video --after 2024-06-01 beach\n  \
+        rummage doctor                         check the GPU, model files, ffmpeg and poppler\n\n\
+        Config: ~/.config/rummage/config.toml (see `rummage config path`); RUMMAGE_* variables override it."
 )]
 pub struct Cli {
     /// Config file to use.
-    #[arg(long, global = true, env = "RUMMAGE_CONFIG", value_name = "FILE")]
+    #[arg(
+        long,
+        global = true,
+        env = "RUMMAGE_CONFIG",
+        value_name = "FILE",
+        help_heading = "Global options"
+    )]
     pub config: Option<PathBuf>,
     /// Talk to the server at this URL (e.g. http://host:8099/search) instead of finding one.
-    #[arg(long, global = true, env = "RUMMAGE_SERVER", value_name = "URL")]
+    #[arg(
+        long,
+        global = true,
+        env = "RUMMAGE_SERVER",
+        value_name = "URL",
+        help_heading = "Global options"
+    )]
     pub server: Option<String>,
     /// Open the index directly even if a server is running.
-    #[arg(long, global = true, conflicts_with = "server")]
+    #[arg(
+        long,
+        global = true,
+        conflicts_with = "server",
+        help_heading = "Global options"
+    )]
     pub local: bool,
     #[command(subcommand)]
     pub cmd: Cmd,
@@ -111,6 +134,7 @@ pub enum Cmd {
 pub enum FoldersCmd {
     /// Start indexing a folder.
     Add {
+        /// The folder to index.
         path: PathBuf,
         /// Skip files matching this glob (relative to the folder); repeatable.
         #[arg(long, value_name = "GLOB")]
