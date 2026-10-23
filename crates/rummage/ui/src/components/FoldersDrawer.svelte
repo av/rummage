@@ -135,7 +135,7 @@
         }}
       >
         <label class="sr-only" for="folder-path">Folder path</label>
-        <input id="folder-path" class="input" bind:this={pathInput} bind:value={path} placeholder="Paste a folder path, e.g. /home/you/Pictures" autocomplete="off" spellcheck="false" />
+        <input id="folder-path" class="input" bind:this={pathInput} bind:value={path} placeholder="Folder path, e.g. ~/Pictures" autocomplete="off" spellcheck="false" />
         <button class="btn primary" type="submit" disabled={!path.trim() || adding}>Add</button>
         <button class="btn" type="button" aria-expanded={browsing} onclick={() => (browsing = !browsing)}><FolderTree size={16} />Browse</button>
       </form>
@@ -359,6 +359,9 @@
   }
   .add .input {
     flex: 1;
+  }
+  .body > .btn {
+    align-self: flex-start;
   }
   .err {
     margin: 0;
