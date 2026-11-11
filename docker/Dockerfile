@@ -35,8 +35,8 @@ FROM toolchain-cpu AS toolchain-vulkan
 ARG VULKAN_SDK_VERSION
 ARG VULKAN_SDK_SHA256
 # Ubuntu 22.04 has no glslc and old Vulkan headers: take both (and SPIRV-Headers) from LunarG's
-# SDK, and link against 22.04's Vulkan loader. Mesa's drivers too, for the tests (22.04's Mesa predates fedora's Radeon 8060S, so build.yml
-# reruns the parity test on the GPU in the Ubuntu 24.04 image).
+# SDK, and link against 22.04's Vulkan loader. Mesa's drivers too, for the tests (22.04's Mesa
+# predates fedora's Radeon 8060S, so build.yml reruns the parity test on the GPU in the image).
 RUN apt-get update && apt-get install -y --no-install-recommends xz-utils libvulkan1 mesa-vulkan-drivers \
     && rm -rf /var/lib/apt/lists/* \
     && curl -fsSL -o /tmp/vulkansdk.tar.xz \
