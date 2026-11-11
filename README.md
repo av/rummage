@@ -43,13 +43,14 @@ starts singing, a nightingale and a blackbird, in files named `REC_0451.ogg` and
 
 ## Try it
 
-Linux x86_64. This is the Vulkan build: recent AMD, NVIDIA and Intel GPUs, with a CPU fallback.
+Linux x86_64, glibc 2.35+ (Ubuntu 22.04, Debian 12 or newer). This is the Vulkan build: recent
+AMD, NVIDIA and Intel GPUs, with a CPU fallback.
 ROCm, CUDA and CPU builds, Docker images and building from source: [Install](docs/install.md).
 
 ```sh
-curl -LO https://github.com/av/rummage/releases/download/v0.1.1/rummage-0.1.1-linux-x86_64-vulkan.tar.gz
-tar xzf rummage-0.1.1-linux-x86_64-vulkan.tar.gz
-cd rummage-0.1.1-linux-x86_64-vulkan
+curl -LO https://github.com/av/rummage/releases/download/v0.1.2/rummage-0.1.2-linux-x86_64-vulkan.tar.gz
+tar xzf rummage-0.1.2-linux-x86_64-vulkan.tar.gz
+cd rummage-0.1.2-linux-x86_64-vulkan
 ./rummage folders add ~/Pictures
 ./rummage serve
 ```

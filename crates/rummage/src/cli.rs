@@ -314,6 +314,10 @@ fn serve(cf: ConfigFile, bind: Option<String>, base_path: Option<String>) -> Res
     std::thread::Builder::new()
         .name("playable".into())
         .spawn(move || crate::extract::playable::prepare(prep))?;
+    let warm = svc.clone();
+    std::thread::Builder::new()
+        .name("warm-up".into())
+        .spawn(move || warm.warm_up())?;
     let served = rt.block_on(server::serve(svc, &bind));
     indexer.stop();
     served

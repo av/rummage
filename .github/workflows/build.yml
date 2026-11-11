@@ -1,9 +1,10 @@
 # Builds, tests and packages rummage for every backend; called by ci.yml and release.yml.
 # Runs on the self-hosted runner on fedora (AMD Ryzen AI Max+ 395, Radeon 8060S). Each backend
-# compiles in its toolchain stage of docker/Dockerfile (Ubuntu 24.04, NVIDIA's CUDA devel image,
-# AMD's ROCm dev image) with a cargo target dir and ccache that persist on fedora, runs the whole
-# test suite there (Vulkan and ROCm on fedora's GPU; CUDA has no GPU here and runs on its CPU
-# fallback), packs the tarball and builds the image from the same binary.
+# compiles in its toolchain stage of docker/Dockerfile (Ubuntu 22.04, so the binaries run on glibc
+# 2.35+; NVIDIA's CUDA devel image, AMD's ROCm dev image) with a cargo target dir and ccache that
+# persist on fedora, runs the whole test suite there (ROCm on fedora's GPU; Vulkan and CUDA on the
+# CPU fallback, then Vulkan's parity test on the GPU in its image), packs the tarball and builds
+# the image from the same binary.
 name: build
 
 on:
@@ -45,10 +46,11 @@ jobs:
           {
             echo "VERSION=${v#v}"
             echo "CACHE_DIR=$CI_ROOT/cache"
-            echo "TARGET_DIR=$CI_ROOT/target/$BACKEND"
+            # Named after the build base: objects built on another glibc must not be reused.
+            echo "TARGET_DIR=$CI_ROOT/target/ubuntu22.04-$BACKEND"
             echo "MODEL_DIR=/mnt/models/rummage/gguf"
             echo "DIST=$CI_ROOT/dist/$GITHUB_RUN_ID"
-            # Vulkan and ROCm tests run on fedora's GPU.
+            # fedora's GPU for the ROCm tests and the Vulkan and ROCm images.
             if [[ $BACKEND == vulkan || $BACKEND == rocm ]]; then echo "GPU=1"; fi
           } >> "$GITHUB_ENV"
 
@@ -68,7 +70,7 @@ jobs:
             ccache -s' $BACKEND
           ls -l $TARGET_DIR/release/rummage
 
-      - name: Test (Vulkan and ROCm on the GPU, CUDA on the CPU fallback)
+      - name: Test (ROCm on the GPU, Vulkan and CUDA on the CPU fallback)
         run: |
           docker/in-toolchain.sh rummage-toolchain:$BACKEND \
             cargo test --release --locked --workspace --features rummage/$BACKEND
@@ -115,6 +117,19 @@ jobs:
           [[ $status == healthy ]]
           docker exec $name curl -fsS http://127.0.0.1:8099/api/v1/health
           docker exec $name id
+
+      # Ubuntu 22.04's Mesa predates the Radeon 8060S, so the Vulkan tests above ran on the CPU
+      # fallback; the image's Mesa (Ubuntu 24.04) drives it.
+      - name: Parity test on the GPU in the image (Vulkan)
+        if: matrix.backend == 'vulkan'
+        run: |
+          test=$(docker/in-toolchain.sh rummage-toolchain:$BACKEND \
+            cargo test --release --locked --workspace --features rummage/$BACKEND --no-run --message-format=json \
+            | jq -r 'select(.target.name == "parity" and .executable != null) | .executable')
+          docker run --rm --device /dev/dri \
+            --group-add $(getent group video | cut -d: -f3) --group-add $(getent group render | cut -d: -f3) \
+            -v "$PWD:/src:ro" -v "$TARGET_DIR:/target:ro" -v "$MODEL_DIR:/models:ro" \
+            -e RUMMAGE_EMBED_MODEL_DIR=/models --entrypoint "$test" rummage-ci:$BACKEND --nocapture
 
       - name: Push image
         if: inputs.push-images

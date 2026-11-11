@@ -154,10 +154,11 @@ pub struct Service {
     store: Store,
     embeds: EmbedQueue,
     events: broadcast::Sender<IndexEvent>,
-    /// Loaded on first search, then updated as files are indexed; with the store's
-    /// `data_version` at load time (another process writing forces a reload).
+    /// Loaded on first search (or by [`Service::warm_up`]), then updated as files are indexed;
+    /// with the store's `data_version` at load time (another process writing forces a reload).
     vectors: RwLock<Option<(VectorIndex, i64)>>,
-    /// The probe queries' vectors ([`crate::probes`]), embedded on the first text search.
+    /// The probe queries' vectors ([`crate::probes`]), embedded on the first text search (or by
+    /// [`Service::warm_up`]).
     probes: OnceLock<Vec<Vec<f32>>>,
     live: Mutex<Live>,
     paused: AtomicBool,
@@ -202,6 +203,21 @@ impl Service {
     /// Embeds for the indexer; searches go first.
     pub fn embed_background(&self, inputs: &[EmbedInput]) -> anyhow::Result<Vec<Vec<f32>>> {
         self.embeds.background(inputs)
+    }
+
+    /// Embeds the ranking probes and loads the vectors (waiting for the model to load), so the
+    /// first search after a start doesn't.
+    pub fn warm_up(&self) {
+        let started = Instant::now();
+        if self.probe_vectors().is_some() {
+            match self.with_vectors(|ix| ix.len()) {
+                Ok(n) => tracing::info!(
+                    "search ready: {n} vectors in {:.1} s",
+                    started.elapsed().as_secs_f64()
+                ),
+                Err(e) => tracing::warn!("can't load the vectors: {e:#}"),
+            }
+        }
     }
 
     /// Sets how uploaded files are decoded for search-by-file.

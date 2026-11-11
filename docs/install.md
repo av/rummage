@@ -14,7 +14,7 @@ when it finds no GPU.
 | `cuda` | NVIDIA GPUs from Turing to Blackwell (sm 75, 80, 86, 89, 90, 100, 120) | the NVIDIA driver (525 or newer) and cuBLAS 12 (`libcublas.so.12`, `libcublasLt.so.12`, from CUDA 12.x) |
 | `cpu` | no GPU | nothing extra |
 
-All builds need glibc 2.39 or newer (Ubuntu 24.04, Fedora 40, Debian 13) and an x86-64-v3 CPU
+All builds need glibc 2.35 or newer (Ubuntu 22.04, Debian 12, Fedora 36) and an x86-64-v3 CPU
 (AVX2, FMA: Intel Haswell or AMD Zen and later). llama.cpp and the CUDA runtime are linked in
 statically; the vendor libraries above stay dynamic.
 
