@@ -12,7 +12,17 @@ permissions:
   packages: write
 
 jobs:
+  version:
+    runs-on: [self-hosted, fedora]
+    steps:
+      - uses: actions/checkout@v5
+      - name: The tag is the version in Cargo.toml
+        run: |
+          v=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
+          [[ "v$v" == "$GITHUB_REF_NAME" ]] || { echo "::error::tag $GITHUB_REF_NAME, Cargo.toml $v"; exit 1; }
+
   backends:
+    needs: version
     uses: ./.github/workflows/build.yml
     with:
       version: ${{ github.ref_name }}
@@ -33,7 +43,7 @@ jobs:
             echo "| Backend | File | Runtime needs |"
             echo "|---|---|---|"
             v=${GITHUB_REF_NAME#v}
-            echo "| CPU | rummage-$v-linux-x86_64-cpu.tar.gz | glibc 2.39+ (Ubuntu 24.04, Fedora 40+), an x86-64-v3 CPU (AVX2) |"
+            echo "| CPU | rummage-$v-linux-x86_64-cpu.tar.gz | glibc 2.35+ (Ubuntu 22.04, Debian 12, Fedora 36+), an x86-64-v3 CPU (AVX2) |"
             echo "| Vulkan | rummage-$v-linux-x86_64-vulkan.tar.gz | the Vulkan loader (libvulkan.so.1) and a Vulkan driver: NVIDIA, AMD or Intel |"
             echo "| ROCm | rummage-$v-linux-x86_64-rocm.tar.gz | ROCm 7.x: HIP runtime, hipBLAS, rocBLAS |"
             echo "| CUDA | rummage-$v-linux-x86_64-cuda.tar.gz | NVIDIA driver 525+, cuBLAS 12 (libcublas.so.12, libcublasLt.so.12) |"
