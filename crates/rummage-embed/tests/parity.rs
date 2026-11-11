@@ -58,18 +58,25 @@ fn read_wav(path: &Path) -> Vec<f32> {
 /// Decodes the given frames as RGB with the same ffmpeg command the reference script used.
 fn decode_frames(path: &Path, indices: &[u64], width: u32, height: u32) -> Vec<ImageData> {
     let select: Vec<String> = indices.iter().map(|i| format!("eq(n\\,{i})")).collect();
-    let out = Command::new("ffmpeg")
-        .args(["-v", "error", "-i"])
-        .arg(path)
-        .args([
-            "-vf",
-            &format!("select='{}'", select.join("+")),
-            "-fps_mode",
-            "passthrough",
-        ])
-        .args(["-f", "rawvideo", "-pix_fmt", "rgb24", "-"])
-        .output()
-        .expect("the video parity item needs ffmpeg on PATH");
+    let run = |sync: &str| {
+        Command::new("ffmpeg")
+            .args(["-v", "error", "-i"])
+            .arg(path)
+            .args([
+                "-vf",
+                &format!("select='{}'", select.join("+")),
+                sync,
+                "passthrough",
+            ])
+            .args(["-f", "rawvideo", "-pix_fmt", "rgb24", "-"])
+            .output()
+            .expect("the video parity item needs ffmpeg on PATH")
+    };
+    // ffmpeg before 5.1 (Ubuntu 22.04 has 4.4) calls -fps_mode -vsync.
+    let mut out = run("-fps_mode");
+    if String::from_utf8_lossy(&out.stderr).contains("Unrecognized option 'fps_mode'") {
+        out = run("-vsync");
+    }
     assert!(
         out.status.success(),
         "ffmpeg failed: {}",
