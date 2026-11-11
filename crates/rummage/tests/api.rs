@@ -699,3 +699,64 @@ async fn kind_counts_dirs_and_waveform() {
     let (status, _, _) = call(&app, get(&format!("/api/v1/items/{}/waveform", f.ids[0]))).await;
     assert_eq!(status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
 }
+
+/// Counts the inputs it embeds.
+struct Counting(FakeEmbedder, std::sync::atomic::AtomicUsize);
+
+impl Embedder for Counting {
+    fn dim(&self) -> usize {
+        self.0.dim()
+    }
+    fn embed(&self, inputs: &[EmbedInput]) -> anyhow::Result<Vec<Vec<f32>>> {
+        self.1
+            .fetch_add(inputs.len(), std::sync::atomic::Ordering::SeqCst);
+        self.0.embed(inputs)
+    }
+    fn modalities(&self) -> rummage_core::Modalities {
+        self.0.modalities()
+    }
+}
+
+#[tokio::test]
+async fn warm_up_leaves_the_first_search_only_its_query() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("config.toml");
+    let data = dir.path().join("data");
+    std::fs::write(&config, format!("data_dir = \"{}\"\n", data.display())).unwrap();
+    let cf = ConfigFile::load_with_env(&config, |_| None).unwrap();
+    let fake = FakeEmbedder::new(768);
+    let counting = Arc::new(Counting(fake.clone(), Default::default()));
+    let svc = Arc::new(Service::open(cf, counting.clone()).unwrap());
+    let path = dir.path().join("bike.md");
+    let text = "a red bicycle leaning on the garden fence";
+    std::fs::write(&path, text).unwrap();
+    seed(
+        &svc,
+        &fake,
+        &path,
+        dir.path(),
+        Kind::Text,
+        text,
+        text.into(),
+    );
+
+    svc.warm_up();
+    let warmed = counting.1.load(std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(warmed, rummage_core::probes::PROBES.len());
+
+    let (status, _, body) = call(
+        &server::app(svc.clone()),
+        json_req(
+            Method::POST,
+            "/api/v1/search",
+            json!({ "query": "red bicycle" }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(parse::<SearchResponse>(&body).hits[0].item.name, "bike.md");
+    assert_eq!(
+        counting.1.load(std::sync::atomic::Ordering::SeqCst),
+        warmed + 1
+    );
+}
