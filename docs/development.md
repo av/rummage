@@ -36,13 +36,16 @@ and CC0 files; [screenshots/README.md](screenshots/README.md) lists the files an
 CI (`.github/workflows/ci.yml`) runs on a self-hosted GitHub Actions runner on fedora (one job
 at a time; each job waits while the machine's load is above 70% of its threads). It runs those
 checks and the web UI's checks and Playwright tests, then builds, tests and packs all four
-backends (`build.yml`), each in its toolchain stage of `docker/Dockerfile` on Ubuntu 24.04:
-NVIDIA's CUDA 12.9 devel image, AMD's ROCm 7.2 dev image, and plain Ubuntu for CPU and Vulkan.
-The Vulkan and ROCm tests, parity test included, run on fedora's Radeon GPU; the CUDA build has
-no GPU there and runs them on its CPU fallback. Cargo target dirs, ccache and the bun cache stay
-under `/mnt/models/rummage/ci` between runs. `docker/in-toolchain.sh <image> <command>` runs the
-same builds by hand. Pushing a `v*` tag runs `release.yml`: the four tarballs and `SHA256SUMS`
-go to a GitHub pre-release, and the images to ghcr.io.
+backends (`build.yml`), each in its toolchain stage of `docker/Dockerfile` on Ubuntu 22.04,
+so the binaries run on glibc 2.35 and newer: NVIDIA's CUDA 12.9 devel image, AMD's ROCm 7.2 dev
+image, and plain Ubuntu for CPU and Vulkan (with glslc and the Vulkan headers from LunarG's SDK).
+The ROCm tests, parity test included, run on fedora's Radeon GPU. Ubuntu 22.04's Mesa predates
+that GPU, so the Vulkan tests run on the CPU fallback and the Vulkan parity test runs again on the
+GPU in the Vulkan image (Ubuntu 24.04); the CUDA build has no GPU there and runs on its CPU
+fallback. Cargo target dirs, ccache and the bun cache stay under `/mnt/models/rummage/ci` between
+runs. `docker/in-toolchain.sh <image> <command>` runs the same builds by hand. Pushing a `v*` tag
+(the version in `Cargo.toml`, with a leading v) runs `release.yml`: the four tarballs and
+`SHA256SUMS` go to a GitHub pre-release, and the images to ghcr.io.
 
 Crates: `crates/rummage` (the binary: CLI, server, embedded UI), `crates/rummage-core`
 (config, SQLite store and schema, search, API types, the `Embedder` trait and a fake embedder

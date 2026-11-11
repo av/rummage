@@ -16,7 +16,8 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   CACHE_DIR: /mnt/models/rummage/ci/cache
-  TARGET_DIR: /mnt/models/rummage/ci/target/check
+  # Named after the build base: objects built on another glibc must not be reused.
+  TARGET_DIR: /mnt/models/rummage/ci/target/check-ubuntu22.04
   MODEL_DIR: /mnt/models/rummage/gguf
 
 jobs:

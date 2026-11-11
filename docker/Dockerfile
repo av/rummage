@@ -4,17 +4,21 @@
 #
 # Builds from source by default. CI builds the binary first (same toolchain stage) and passes
 # it in with `--build-context dist=<dir with rummage>`, which replaces the `dist` stage below.
-# Everything is Ubuntu 24.04 based (glibc 2.39), so the binaries also run on newer distros.
+# The binaries are built on Ubuntu 22.04 (glibc 2.35), so they also run on Ubuntu 22.04, Debian 12
+# and newer distros; the images are Ubuntu 24.04 based.
 
 ARG BACKEND=cpu
 ARG UBUNTU=24.04
+ARG BUILD_UBUNTU=22.04
+ARG VULKAN_SDK_VERSION=1.3.296.0
+ARG VULKAN_SDK_SHA256=79b0a1593dadc46180526250836f3e53688a9a5fb42a0e5859eb72316dc4d53e
 ARG CUDA_VERSION=12.9.2
 ARG ROCM_VERSION=7.2.4
 ARG RUST_VERSION=1.99.1
 
 # ---------------------------------------------------------------- toolchains
 
-FROM docker.io/library/ubuntu:${UBUNTU} AS toolchain-cpu
+FROM docker.io/library/ubuntu:${BUILD_UBUNTU} AS toolchain-cpu
 ARG RUST_VERSION
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -28,12 +32,25 @@ RUN curl -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path --profile mini
     && chmod -R a+rX /usr/local/rustup /usr/local/cargo
 
 FROM toolchain-cpu AS toolchain-vulkan
-# Mesa's drivers too, so the tests can run on the GPU when /dev/dri is passed in.
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        libvulkan-dev glslc spirv-headers mesa-vulkan-drivers \
-    && rm -rf /var/lib/apt/lists/*
+ARG VULKAN_SDK_VERSION
+ARG VULKAN_SDK_SHA256
+# Ubuntu 22.04 has no glslc and old Vulkan headers: take both (and SPIRV-Headers) from LunarG's
+# SDK, and link against 22.04's Vulkan loader. Mesa's drivers too, for the tests (22.04's Mesa predates fedora's Radeon 8060S, so build.yml
+# reruns the parity test on the GPU in the Ubuntu 24.04 image).
+RUN apt-get update && apt-get install -y --no-install-recommends xz-utils libvulkan1 mesa-vulkan-drivers \
+    && rm -rf /var/lib/apt/lists/* \
+    && curl -fsSL -o /tmp/vulkansdk.tar.xz \
+        https://sdk.lunarg.com/sdk/download/${VULKAN_SDK_VERSION}/linux/vulkansdk-linux-x86_64-${VULKAN_SDK_VERSION}.tar.xz \
+    && echo "${VULKAN_SDK_SHA256}  /tmp/vulkansdk.tar.xz" | sha256sum -c - \
+    && mkdir /opt/vulkan-sdk \
+    && tar -xJf /tmp/vulkansdk.tar.xz -C /opt/vulkan-sdk --strip-components=2 --wildcards \
+        '*/x86_64/bin/glslc' '*/x86_64/include/vulkan' '*/x86_64/include/vk_video' \
+        '*/x86_64/include/spirv' '*/x86_64/share/cmake/SPIRV-Headers' \
+    && rm /tmp/vulkansdk.tar.xz \
+    && ln -s libvulkan.so.1 /usr/lib/x86_64-linux-gnu/libvulkan.so
+ENV VULKAN_SDK=/opt/vulkan-sdk PATH=/opt/vulkan-sdk/bin:$PATH CMAKE_PREFIX_PATH=/opt/vulkan-sdk
 
-FROM docker.io/nvidia/cuda:${CUDA_VERSION}-devel-ubuntu${UBUNTU} AS toolchain-cuda
+FROM docker.io/nvidia/cuda:${CUDA_VERSION}-devel-ubuntu${BUILD_UBUNTU} AS toolchain-cuda
 ARG RUST_VERSION
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -44,7 +61,7 @@ RUN curl -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path --profile mini
         --default-toolchain ${RUST_VERSION} \
     && chmod -R a+rX /usr/local/rustup /usr/local/cargo
 
-FROM docker.io/rocm/dev-ubuntu-${UBUNTU}:${ROCM_VERSION} AS toolchain-rocm
+FROM docker.io/rocm/dev-ubuntu-${BUILD_UBUNTU}:${ROCM_VERSION} AS toolchain-rocm
 ARG RUST_VERSION
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
