@@ -6,8 +6,8 @@
 
 <p align="center">
   <b>Find the file by what is in it.</b><br>
-  Describe a photo, a sound, a moment in a video or a page in a PDF, and rummage finds it.<br>
-  On your own computer: no cloud, no account, no tagging.
+  Describe a photo, a sound, a moment in a video or a page in a PDF. rummage finds it.<br>
+  Everything stays on your computer. No cloud, no account, no tagging.
 </p>
 
 <p align="center">
@@ -19,7 +19,7 @@
 <p align="center">
   <a href="#try-it">Try it</a> ·
   <a href="#what-it-finds">What it finds</a> ·
-  <a href="#why-youll-like-it">Why you’ll like it</a> ·
+  <a href="#what-you-get">What you get</a> ·
   <a href="#docs">Docs</a>
 </p>
 
@@ -31,12 +31,13 @@
 
 ## You remember what it looked like, not what it was called
 
-Your library is `IMG_2248.jpg`, `REC_0451.ogg` and `VID_20250504_0611.mp4`. Folder search can’t help,
-and scrubbing through a two-hour video to find one moment is no fun.
+Your library is `IMG_2248.jpg`, `REC_0451.ogg` and `VID_20250504_0611.mp4`. Folder search can’t help.
+Neither can scrubbing through a long video for one moment.
 
 rummage looks at your pictures, listens to your recordings, watches your videos and reads your
-documents, then lets you search all of it in one box, in your own words. Point it at your folders,
-type what you remember, and open the result at the exact spot that matched.
+documents. Then you search all of it from one box, in your own words. Point it at your folders,
+type what you remember, and open the result at the exact spot that matched. It doesn’t organise,
+move or tag anything: it finds.
 
 ## What it finds
 
@@ -62,23 +63,20 @@ Photos, videos, recordings, PDFs and text sit in the same results, so a search f
 turns up the booking PDF whose page has a whale photo on it. Every query and file shown here is
 listed in [Screenshots and demo library](docs/screenshots/README.md).
 
-## Why you’ll like it
+## What you get
 
-- **It is yours.** Your files and your searches never leave the machine. No account, no upload,
-  no subscription. rummage only reads your files; its index and thumbnails live in a folder of their own.
-  The model is downloaded once; after that it works offline.
-- **It points at the moment.** A video result starts playing where the match is, an audio result
-  at the matching seconds, a PDF result shows the page. Phone videos in HEVC, which many browsers
-  can’t play, are converted on the fly so they play too.
-- **It is quick.** A search answers in about 10 ms, on a library of 4,500 files too. Results fill in
-  while a folder is still being indexed, and it keeps up with you: new, edited, moved and deleted
-  files are picked up as they happen.
-- **It understands more than English.** The same search works in Japanese, German and other
-  languages, and you can search by example: drop a photo, a sound or a note on the page, or press
-  “More like this” on any result. Narrow results by kind, folder and date.
-- **It fits how you work.** A web page (dark and light, and it works on a phone), a command line
-  and an HTTP API for scripts, in one program that uses an AMD, NVIDIA or Intel GPU and falls back
-  to the CPU.
+- **Private.** Your files and searches never leave the machine, and rummage only reads your files:
+  its index and thumbnails live in a folder of their own. The model is downloaded once; after that
+  it works offline.
+- **Opens at the match.** A video starts playing where the match is, an audio file at the matching
+  seconds, and a PDF shows the page. Phone videos that browsers can’t play are converted on the fly.
+- **Fast.** About 10 ms a search, on a library of 4,500 files too. Results fill in while a folder is
+  still being indexed, and new, edited, moved and deleted files are picked up as they happen.
+- **Not just English.** The same search works in Japanese and German, as the examples above show.
+- **Search by example.** Drop a photo, a sound or a note on the page, or press “More like this” on
+  a result. Narrow results by kind, folder and date.
+- **One program.** A web page (light and dark, and it works on a phone), a command line and an HTTP
+  API for scripts. It uses an AMD, NVIDIA or Intel GPU and falls back to the CPU.
 
 <p align="center"><sub>The same search on a phone.</sub></p>
 
@@ -91,10 +89,12 @@ listed in [Screenshots and demo library](docs/screenshots/README.md).
 
 ## Try it
 
-For now rummage is built for **Linux x86_64 only** (Ubuntu 22.04, Debian 12 or newer): there is no
-macOS or Windows build yet. This is the Vulkan build, which runs on any recent AMD, NVIDIA or Intel
-GPU, or on the CPU, more slowly. It needs a CPU with AVX2 (Intel Haswell, AMD Zen or newer) and,
-for video and HEIC photos, [ffmpeg](https://ffmpeg.org) (for PDF page pictures, `poppler-utils`).
+rummage runs on **Linux x86_64 only** for now (Ubuntu 22.04, Debian 12 or newer); there is no macOS
+or Windows build yet. This download uses any recent AMD, NVIDIA or Intel GPU through Vulkan, or the
+CPU, more slowly. It also needs:
+
+- a CPU with AVX2 (Intel Haswell, AMD Zen or newer);
+- [ffmpeg](https://ffmpeg.org), to read video and HEIC photos, and `poppler-utils`, to show PDF pages.
 
 ```sh
 curl -LO https://github.com/av/rummage/releases/download/v0.1.2/rummage-0.1.2-linux-x86_64-vulkan.tar.gz
@@ -104,19 +104,19 @@ cd rummage-0.1.2-linux-x86_64-vulkan
 ./rummage serve
 ```
 
-Open <http://127.0.0.1:8099/> and describe what you are looking for. The first run downloads the
-model (about 865 MB); results appear as files are indexed.
+Open <http://127.0.0.1:8099/> and type something you remember. The first run downloads the model
+(about 865 MB); results appear as files are indexed.
 
-On a Radeon 8060S, the 111-file demo library above is indexed in under two minutes.
+On a Radeon 8060S, the 111-file demo library is indexed in under two minutes.
 Other builds (ROCm, CUDA, CPU), Docker images and building from source are in
 [Install](docs/install.md); the command line and everything the page can do are in
 [Using rummage](docs/usage.md).
 
-## Good to know
+## Limits
 
-rummage is young: 0.1, a pre-release. It has been run over a real library of about 4,500 photos,
-videos, recordings, notes and PDFs; the [review](docs/REVIEW-2026-10.md) has the numbers and the
-[benchmarks](docs/BENCH-fedora.md) compare the GPU backends with the CPU.
+rummage is at an early stage (0.1, a pre-release). It has run on a real library of about 4,500
+photos, videos, recordings, notes and PDFs; the [review](docs/REVIEW-2026-10.md) has the numbers and
+the [benchmarks](docs/BENCH-fedora.md) compare the GPU backends with the CPU.
 
 - Search ranks by likeness, so a query with no true match still shows the closest files.
 - It finds things by what they show and say, not by who is in them: there is no face recognition.
@@ -127,7 +127,7 @@ Bug reports and ideas are welcome in [Issues](https://github.com/av/rummage/issu
 ## Under the hood
 
 One model, Google DeepMind’s multilingual [EmbeddingGemma 2](https://huggingface.co/google/embeddinggemma-2),
-turns text, images, sound and video frames into the same kind of vector, so a sentence can sit
+turns text, images, sound and video frames into numbers that can be compared, so a sentence lands
 next to the thing it describes. It runs on [llama.cpp](https://github.com/ggml-org/llama.cpp),
 built into the binary, and keyword search (names, text, photo dates and cameras) is mixed in with the
 meaning search. [How it works](docs/how-it-works.md) has the details.
