@@ -22,6 +22,25 @@ Two optional tools add file types: **ffmpeg** (and ffprobe) for video and HEIC/A
 **poppler-utils** (`pdftoppm`, `pdftotext`) for PDF page images. Without ffmpeg, videos are
 listed as skipped with the reason; without poppler, PDFs are indexed by their text only.
 
+## First run
+
+```sh
+./rummage folders add ~/Pictures     # add as many folders as you like (or add them on the page)
+./rummage serve                      # index them and serve the web page
+```
+
+Open <http://127.0.0.1:8099/> and describe what you are looking for. The first run downloads the
+model (about 865 MB); results fill in while the folders are indexed. From another terminal:
+
+```sh
+./rummage search "birds singing"
+./rummage doctor        # GPU, model files, ffmpeg, poppler, config
+```
+
+On an AMD Radeon 8060S a library of 111 files (photos, recordings, videos, PDFs and notes) is
+indexed in under two minutes, and a search takes about 10 ms even over 4,500 files; the CPU
+indexes 6 to 8 times slower ([benchmarks](BENCH-fedora.md)).
+
 ## Docker
 
 Images are `ghcr.io/av/rummage:<version>-<backend>` and `ghcr.io/av/rummage:latest-<backend>`.
