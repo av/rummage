@@ -22,6 +22,42 @@ Two optional tools add file types: **ffmpeg** (and ffprobe) for video and HEIC/A
 **poppler-utils** (`pdftoppm`, `pdftotext`) for PDF page images. Without ffmpeg, videos are
 listed as skipped with the reason; without poppler, PDFs are indexed by their text only.
 
+## First run
+
+```sh
+./rummage folders add ~/Pictures     # add as many folders as you like (or add them on the page)
+./rummage serve                      # index them and serve the web page
+```
+
+Open <http://127.0.0.1:8099/> and describe what you are looking for. The first run downloads the
+model (about 865 MB); results fill in while the folders are indexed. From another terminal:
+
+```sh
+./rummage search "birds singing"
+./rummage doctor        # GPU, model files, ffmpeg, poppler, config
+```
+
+On an AMD Radeon 8060S a 770-file sample (photos, audio, video, PDFs and notes) indexes in 251 s
+with Vulkan and in 1,648 s on the CPU, and a search takes about 10 ms over 4,500 files
+([benchmarks](BENCH-fedora.md)).
+
+## Harbor
+
+rummage is a service in [Harbor](https://github.com/av/harbor). It runs the `ghcr.io/av/rummage`
+image that matches the hardware Harbor detects (CPU, CUDA, or Vulkan/ROCm on AMD), as your host
+user, with config, index and models in a Harbor workspace and your folder mounted read-only at
+`/folders`:
+
+```sh
+harbor config set rummage.folders ~/Pictures
+harbor pull rummage
+harbor up rummage --open          # http://localhost:35100
+harbor exec rummage rummage folders add /folders
+```
+
+GPU groups, the AMD backend choice, settings and troubleshooting are in
+[rummage in Harbor](https://github.com/av/harbor/wiki/2.3.103-Satellite-Rummage).
+
 ## Docker
 
 Images are `ghcr.io/av/rummage:<version>-<backend>` and `ghcr.io/av/rummage:latest-<backend>`.
